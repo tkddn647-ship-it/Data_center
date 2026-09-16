@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>대구 응급 중앙관제 · 실시간</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --ink: #1a2332; --muted: #5c6b7a; --panel: #f7f4ef; --line: #d5cfc4;
+      --accent: #c45c26; --fire: #c45c26; --amb: #2f6f8f; --ok: #2d6a4f;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: "Noto Sans KR", "Malgun Gothic", sans-serif; color: var(--ink); background: #e8e2d8; }
+    .app { display: grid; grid-template-columns: 360px 1fr; height: 100%; }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      aside { max-height: 48vh; overflow: auto; }
+    }
+    aside {
+      background: var(--panel); border-right: 1px solid var(--line);
+      padding: 1rem 1.1rem 1.2rem; display: flex; flex-direction: column; gap: 0.75rem;
+    }
+    .brand { font-family: Georgia, "Times New Roman", serif; font-size: 1.28rem; margin: 0; letter-spacing: -0.02em; }
+    .sub { margin: 0; color: var(--muted); font-size: 0.8rem; line-height: 1.4; }
+    label { display: block; font-size: 0.72rem; color: var(--muted); margin-bottom: 0.2rem; }
+    select, button, input[type="range"] {
+      width: 100%; font: inherit; border-radius: 6px; border: 1px solid var(--line);
+      padding: 0.5rem 0.6rem; background: #fff;
+    }
+    button { cursor: pointer; background: var(--ink); color: #fff; border-color: var(--ink); font-weight: 600; }
+    button.ghost { background: transparent; color: var(--ink); }
+    button.play { background: var(--ok); border-color: var(--ok); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.4rem; }
+    .clock-box {
+      background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 0.55rem 0.65rem;
+    }
+    .clock {
+      font-family: Georgia, serif; font-size: 1.6rem; letter-spacing: 0.04em; margin: 0;
+    }
+    .clock small { font-size: 0.75rem; color: var(--muted); margin-left: 0.4rem; }
+    .hint {
+      font-size: 0.78rem; background: #fff; border: 1px dashed var(--line);
+      padding: 0.55rem 0.65rem; border-radius: 6px; color: var(--muted);
+    }
+    .hint strong { color: var(--accent); }
+    #map { width: 100%; height: 100%; min-height: 360px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.35rem; font-size: 0.72rem; }
+    .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem; text-align: center; }
+    .stat b { display: block; font-size: 1rem; }
+    .list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 0.4rem; min-height: 80px; }
+    .item { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.6rem; font-size: 0.78rem; }
+    .item .top { display: flex; justify-content: space-between; align-items: center; gap: 0.35rem; }
+    .tag { font-size: 0.66rem; padding: 0.1rem 0.35rem; border-radius: 999px; background: #efe6dc; color: var(--fire); font-weight: 600; }
+    .tag.amb { background: #e2eef3; color: var(--amb); }
+    .tag.mix { background: #ece8f2; color: #5a4a7a; }
+    .item button.x { width: auto; padding: 0.12rem 0.4rem; font-size: 0.7rem; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    .missions { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; }
+    .status { font-size: 0.74rem; color: var(--ok); min-height: 1.1em; }
+    .status.err { color: #9b2226; }
+    .legend-c { font-size: 0.7rem; color: var(--muted); line-height: 1.55; }
+    .sw { display: inline-block; width: 12px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: middle; }
+    .log {
+      font-size: 0.68rem; color: var(--muted); max-height: 72px; overflow: auto;
+      background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div>
+        <h1 class="brand">대구 응급 중앙관제</h1>
+        <p class="sub">날짜·연휴·시간대 혼잡 예측 → 최적 출동경로 (표현용, 이후 학습모델 교체)</p>
+      </div>
+
+      <div class="clock-box">
+        <label for="sim-date">기준 날짜 (평일/주말/추석·설 반영)</label>
+        <input type="date" id="sim-date" style="width:100%;margin-bottom:0.45rem" />
+        <div id="cal-badge" style="font-size:0.78rem;margin-bottom:0.4rem;color:var(--muted)"></div>
+        <label>시뮬 시각</label>
+        <p class="clock" id="clock"><span id="clock-text">08:00:00</span> <small id="clock-src"></small></p>
+        <input type="range" id="time" min="0" max="1439" step="5" value="480" />
+        <div class="row" style="margin-top:0.45rem">
+          <button type="button" class="play" id="btn-play">▶ 실시간 재생</button>
+          <button type="button" class="ghost" id="btn-pause">일시정지</button>
+        </div>
+        <div style="margin-top:0.4rem">
+          <label for="speed">배속 <span id="speed-label">15x</span> (1x=실제 GPS 속도)</label>
+          <input type="range" id="speed" min="1" max="30" step="1" value="15" />
+        </div>
+        <div id="cong-bar" style="margin-top:0.45rem;font-size:0.72rem;color:var(--muted)"></div>
+        <div id="forecast-box" style="margin-top:0.5rem">
+          <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.25rem">향후 6시간 혼잡 예측</div>
+          <div id="forecast-bars" style="display:flex;align-items:flex-end;gap:3px;height:52px"></div>
+          <div id="forecast-note" style="font-size:0.7rem;color:var(--muted);margin-top:0.25rem"></div>
+        </div>
+        <div style="margin-top:0.45rem;font-size:0.7rem;color:var(--muted)">
+          교통량
+          <span style="display:inline-block;width:72px;height:8px;vertical-align:middle;margin:0 4px;border-radius:2px;
+            background:linear-gradient(90deg,#2166ac,#67a9cf,#fddbc7,#ef8a62,#b2182b)"></span>
+          한산→혼잡
+        </div>
+      </div>
+
+      <div>
+        <label for="itype">다음에 찍을 사고 유형</label>
+        <select id="itype"></select>
+      </div>
+
+      <div class="hint">
+        <strong>목표</strong>: 지금 날짜 기준으로 <em>앞으로</em> 얼마나 막힐지 예측하고 그걸로 경로를 잡음<br />
+        지도 색 = 교통량 (파랑 한산 · 빨강 혼잡). 학습 전 데모 모델입니다.
+      </div>
+
+      <div class="row">
+        <button type="button" id="btn-clear" class="ghost">전체 삭제</button>
+        <button type="button" id="btn-demo">데모 3건</button>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><b id="s-inc">0</b>사고</div>
+        <div class="stat"><b id="s-unit">0</b>출동</div>
+        <div class="stat"><b id="s-ov">0</b>겹침</div>
+        <div class="stat"><b id="s-rr">0</b>재경로</div>
+      </div>
+
+      <div class="status" id="status">준비됨 — 사고 찍고 재생하세요</div>
+      <div class="list" id="list"></div>
+      <div class="log" id="log"></div>
+      <div class="legend-c" id="legend"></div>
+    </aside>
+    <div id="map"></div>
+  </div>
+
+  <script>
+    const COLORS = ["#00e5ff", "#ff2d6a", "#b8f200", "#ff9f1c", "#7b61ff", "#00f5d4", "#f15bb5", "#fee440"];
+
+
+    let meta = null, map = null;
+    let costLayer, facilityLayer, routeLayer, incidentLayer, vehicleLayer;
+    let incidents = [];
+    let localSeq = 1;
+    let dispatchTimer = null;
+    let playing = false;
+    let raf = null;
+    let playTimer = null;
+    let lastTs = 0;
+    let tMin = 480;
+    let costmapTimer = null;
+    let rerouteTimer = null;
+    let totalReroutes = 0;
+    let lastCostmapT = -999;
+    let lastRerouteSimMin = -999;
+    let syncingClock = false;
+    let suppressDispatchFromClock = false;
+
+    let simDate = null; // YYYY-MM-DD
+
+    function getDateParam() {
+      const el = document.getElementById("sim-date");
+      return (el && el.value) ? el.value : (simDate || meta?.default_date);
+    }
+
+    function renderForecast(fc) {
+      const box = document.getElementById("forecast-bars");
+      const note = document.getElementById("forecast-note");
+      if (!box || !fc || !fc.series) return;
+      const maxC = Math.max(...fc.series.map(s => s.congestion), 0.01);
+      box.innerHTML = fc.series.map(s => {
+        const h = Math.max(4, Math.round(48 * s.congestion / maxC));
+        return `<div title="${s.time_label} ${s.severity} (${s.congestion})"
+          style="flex:1;height:${h}px;background:${s.color};border-radius:2px 2px 0 0"></div>`;
+      }).join("");
+      const peak = fc.peak || {};
+      note.textContent = `지금 ${fc.now} · 추세 ${fc.trend} · 피크 ${peak.time_label || ""} (${peak.congestion || ""})`;
+      if (fc.calendar) {
+        document.getElementById("cal-badge").textContent =
+          `${fc.calendar.date} · ${fc.calendar.weekday_name}요일 · ${fc.calendar.label} (교통배율 ×${fc.calendar.volume_factor})`;
+      }
+    }
+
+    async function refreshForecast() {
+      const q = new URLSearchParams({
+        t_min: String(Math.floor(tMin)),
+        hours: "6",
+        date: getDateParam(),
+      });
+      const fc = await (await fetch(`/api/forecast?${q}`)).json();
+      renderForecast(fc);
+    }
+    function tagClass(type) {
+      if (type.startsWith("fire")) return "tag";
+      if (type.startsWith("medical")) return "tag amb";
+      return "tag mix";
+    }
+    function setStatus(msg, err=false) {
+      const el = document.getElementById("status");
+      el.textContent = msg;
+      el.className = "status" + (err ? " err" : "");
+    }
+    function logLine(msg) {
+      const el = document.getElementById("log");
+      const t = clockLabel(tMin);
+      el.innerHTML = `[${t}] ${msg}<br>` + el.innerHTML;
+    }
+    function clockLabel(m, withSec = true) {
+      m = ((m % 1440) + 1440) % 1440;
+      const hh = String(Math.floor(m / 60)).padStart(2, "0");
+      const mm = String(Math.floor(m % 60)).padStart(2, "0");
+      if (!withSec) return `${hh}:${mm}`;
+      const ss = String(Math.floor((m * 60) % 60)).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+    function syncClockUI() {
+      const el = document.getElementById("clock-text");
+      if (el) el.textContent = clockLabel(tMin, true);
+      const slider = document.getElementById("time");
+      if (slider) {
+        syncingClock = true;
+        slider.value = String(Math.floor(tMin) % 1440);
+        syncingClock = false;
+      }
+    }
+
+    async function init() {
+      meta = await (await fetch("/api/meta")).json();
+      document.getElementById("clock-src").textContent = meta.congestion_source || "";
+      tMin = meta.default_t_min || 480;
+      simDate = meta.default_date;
+      const dateEl = document.getElementById("sim-date");
+      if (dateEl) {
+        dateEl.value = simDate;
+        dateEl.onchange = () => {
+          simDate = dateEl.value;
+          scheduleCostmap();
+          refreshForecast();
+          if (incidents.length) scheduleDispatch(true);
+        };
+      }
+      syncClockUI();
+      if (meta.calendar) {
+        document.getElementById("cal-badge").textContent =
+          `${meta.calendar.date} · ${meta.calendar.weekday_name}요일 · ${meta.calendar.label}`;
+      }
+
+      const sel = document.getElementById("itype");
+      for (const [k, v] of Object.entries(meta.presets)) {
+        const opt = document.createElement("option");
+        opt.value = k; opt.textContent = `${k} — ${v.label}`;
+        if (k === "medical_1") opt.selected = true;
+        sel.appendChild(opt);
+      }
+
+      const legend = document.getElementById("legend");
+      legend.innerHTML = `지도 색 = 교통량 <span class="sw" style="background:#2166ac"></span>한산
+        <span class="sw" style="background:#ef8a62"></span>혼잡
+        <span class="sw" style="background:#b2182b"></span>정체<br>
+        남색□ 소방서 · 빨강△ 응급실 · 형광선 출동경로`;
+
+      const b = meta.bounds;
+      const daeguBounds = L.latLngBounds(
+        [b.lat_min, b.lng_min],
+        [b.lat_max, b.lng_max]
+      );
+
+      map = L.map("map", {
+        maxBounds: daeguBounds.pad(0.02),
+        maxBoundsViscosity: 1.0,
+        minZoom: 11,
+        maxZoom: 17,
+      });
+      map.fitBounds(daeguBounds, { padding: [8, 8] });
+
+      // 배경: OSM (Carto는 API키 필요해 깨짐)
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap",
+        maxZoom: 19,
+        bounds: daeguBounds,
+        noWrap: true,
+      }).addTo(map);
+      // 타일 실패해도 도로색이 보이게 배경색
+      document.getElementById("map").style.background = "#dfe6e0";
+
+      // 대구 밖은 패널색으로 가려서 costmap만 보이게
+      const worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180]];
+      const daeguHole = [
+        [b.lat_min, b.lng_min],
+        [b.lat_min, b.lng_max],
+        [b.lat_max, b.lng_max],
+        [b.lat_max, b.lng_min],
+      ];
+      L.polygon([worldRing, daeguHole], {
+        stroke: false,
+        fillColor: "#e8e2d8",
+        fillOpacity: 0.92,
+        interactive: false,
+        pane: "mapPane",
+      }).addTo(map);
+      L.rectangle(daeguBounds, {
+        color: "#1a2332", weight: 1.5, opacity: 0.45,
+        fill: false, interactive: false,
+      }).addTo(map);
+
+      // 경로가 costmap 아래에 깔리지 않도록 전용 pane
+      map.createPane("costPane");
+      map.getPane("costPane").style.zIndex = 350;
+      map.createPane("routePane");
+      map.getPane("routePane").style.zIndex = 450;
+      map.createPane("vehiclePane");
+      map.getPane("vehiclePane").style.zIndex = 550;
+
+      costLayer = L.layerGroup({ pane: "costPane" }).addTo(map);
+      facilityLayer = L.layerGroup().addTo(map);
+      routeLayer = L.layerGroup({ pane: "routePane" }).addTo(map);
+      incidentLayer = L.layerGroup().addTo(map);
+      vehicleLayer = L.layerGroup({ pane: "vehiclePane" }).addTo(map);
+
+      for (const s of meta.stations) {
+        L.marker([s.lat, s.lng], {
+          icon: L.divIcon({
+            className: "",
+            html: `<div style="width:11px;height:11px;background:#1a2332;border:2px solid #fff"></div>`,
+            iconSize: [11,11], iconAnchor: [5,5],
+          }),
+        }).bindTooltip(s.name).addTo(facilityLayer);
+      }
+      for (const h of meta.hospitals) {
+        L.marker([h.lat, h.lng], {
+          icon: L.divIcon({
+            className: "",
+            html: `<div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid #9b2226"></div>`,
+            iconSize: [12,11], iconAnchor: [6,11],
+          }),
+        }).bindTooltip(h.name).addTo(facilityLayer);
+      }
+
+      map.on("click", (e) => {
+        if (!daeguBounds.contains(e.latlng)) {
+          setStatus("대구 영역 안에서만 사고를 찍을 수 있습니다", true);
+          return;
+        }
+        incidents.push({ type: document.getElementById("itype").value, lat: e.latlng.lat, lng: e.latlng.lng, localId: localSeq++ });
+        scheduleDispatch(true);
+      });
+
+      document.getElementById("time").oninput = (e) => {
+        if (syncingClock) return;
+        tMin = Number(e.target.value);
+        syncClockUI();
+        scheduleCostmap();
+        refreshForecast();
+        // 재생 중 슬라이더 드래그가 플릿을 리셋하지 않게
+        if (!playing && incidents.length) scheduleDispatch(true);
+      };
+      const speedEl = document.getElementById("speed");
+      const syncSpeedLabel = () => {
+        document.getElementById("speed-label").textContent = `${speedEl.value}x`;
+      };
+      speedEl.oninput = syncSpeedLabel;
+      syncSpeedLabel();
+      document.getElementById("btn-play").onclick = () => startPlay(true);
+      document.getElementById("btn-pause").onclick = () => stopPlay(true);
+      document.getElementById("btn-clear").onclick = () => {
+        incidents = []; fleet = [];
+        routeLayer.clearLayers(); vehicleLayer.clearLayers(); incidentLayer.clearLayers();
+        document.getElementById("list").innerHTML = "";
+        document.getElementById("s-inc").textContent = "0";
+        document.getElementById("s-unit").textContent = "0";
+        setStatus("사고 없음");
+      };
+      document.getElementById("btn-demo").onclick = () => {
+        incidents = [
+          { type: "fire_1", lat: 35.87, lng: 128.60, localId: localSeq++ },
+          { type: "medical_1", lat: 35.85, lng: 128.55, localId: localSeq++ },
+          { type: "mixed_2", lat: 35.90, lng: 128.62, localId: localSeq++ },
+        ];
+        scheduleDispatch(true);
+      };
+
+      await refreshCostmap(true);
+      await refreshForecast();
+      setStatus("준비됨 — 날짜·시간 고르고 사고 찍기");
+    }
+
+    function scheduleCostmap() {
+      clearTimeout(costmapTimer);
+      costmapTimer = setTimeout(() => refreshCostmap(false), 120);
+    }
+
+    async function refreshCostmap(force) {
+      if (!costLayer) return;
+      const bucket = Math.floor(tMin / 5) * 5;
+      if (!force && bucket === lastCostmapT) return;
+      lastCostmapT = bucket;
+      try {
+        const data = await (await fetch(`/api/costmap?t_min=${bucket}&date=${encodeURIComponent(getDateParam())}`)).json();
+        costLayer.clearLayers();
+        const segs = data.segments || [];
+        for (const seg of segs) {
+          L.polyline(seg.coords, {
+            color: seg.color || "#888",
+            weight: 3.2 + (seg.level || 0) * 1.2,
+            opacity: 0.75,
+            pane: "costPane",
+            interactive: false,
+          }).addTo(costLayer);
+        }
+        const h = data.histogram || [0,0,0,0];
+        const tot = Math.max(1, h.reduce((a,b)=>a+b,0));
+        const avg = data.city_avg != null ? ` · 평균 ${data.city_avg}` : "";
+        const bar = document.getElementById("cong-bar");
+        if (bar) {
+          bar.innerHTML =
+            `${data.time_label || ""} 교통량 도로 ${segs.length}개${avg}<br>` +
+            `한산 ${Math.round(100*h[0]/tot)}% · 서행 ${Math.round(100*h[1]/tot)}% · ` +
+            `혼잡 ${Math.round(100*h[2]/tot)}% · 정체 ${Math.round(100*h[3]/tot)}%`;
+        }
+        if (data.calendar) {
+          const badge = document.getElementById("cal-badge");
+          if (badge) {
+            badge.textContent =
+              `${data.calendar.date} · ${data.calendar.weekday_name}요일 · ${data.calendar.label} (×${data.calendar.volume_factor})`;
+          }
+        }
+      } catch (err) {
+        console.error("costmap", err);
+        setStatus(`교통량 지도 로드 실패: ${err.message || err}`, true);
+      }
+    }
+
+    function scheduleDispatch(resetFleet) {
+      renderIncidentDraft();
+      setStatus("배차·경로 계산 중…");
+      clearTimeout(dispatchTimer);
+      dispatchTimer = setTimeout(() => runDispatch(resetFleet), 160);
+    }
+
+    function renderIncidentDraft() {
+      const list = document.getElementById("list");
+      list.innerHTML = "";
+      incidentLayer.clearLayers();
+      incidents.forEach((inc, idx) => {
+        L.circleMarker([inc.lat, inc.lng], { radius: 7, color: "#111", weight: 2, fillColor: "#fff", fillOpacity: 0.9 })
+          .addTo(incidentLayer);
+        const div = document.createElement("div");
+        div.className = "item";
+        div.innerHTML = `<div class="top"><span><span class="${tagClass(inc.type)}">${inc.type}</span> #${idx+1}</span>
+          <button type="button" class="x" data-id="${inc.localId}">삭제</button></div>`;
+        list.appendChild(div);
+      });
+      list.querySelectorAll("button.x").forEach(btn => {
+        btn.onclick = () => {
+          incidents = incidents.filter(x => x.localId !== Number(btn.dataset.id));
+          scheduleDispatch(true);
+        };
+      });
+      document.getElementById("s-inc").textContent = String(incidents.length);
+    }
+
+    async function runDispatch(resetFleet) {
+      if (!incidents.length) {
+        fleet = [];
+        routeLayer.clearLayers(); vehicleLayer.clearLayers();
+        document.getElementById("s-unit").textContent = "0";
+        setStatus("사고 없음");
+        return;
+      }
+      try {
+        const res = await fetch("/api/dispatch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            t_min: tMin,
+            date: getDateParam(),
+            horizon_min: 45,
+            incidents: incidents.map(i => ({ type: i.type, lat: i.lat, lng: i.lng })),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "dispatch failed");
+        if (!data.missions || !data.missions.length) {
+          throw new Error("배차 결과 없음 (경로 0건)");
+        }
+        if (data.forecast) renderForecast({ ...data.forecast, series: data.forecast.series, calendar: data.calendar, now: data.forecast.now, trend: data.forecast.trend, peak: data.forecast.peak });
+        else refreshForecast();
+        drawIncidents(data);
+        buildFleet(data.missions);
+        drawRoutesAndVehicles();
+        fitToMissions(data.missions);
+        await refreshCostmap(true);
+        await refreshForecast();
+        document.getElementById("s-unit").textContent = String(data.summary.n_units);
+        document.getElementById("s-ov").textContent = String(data.summary.overlap);
+        const totalEta = data.summary.total_eta_min != null ? data.summary.total_eta_min
+          : data.missions.reduce((s, m) => s + (m.eta_min || 0), 0);
+        setStatus(`${data.time_label} 배차 ${data.missions.length}대 · ETA ${totalEta}분 · 교통량/경로 표시`);
+        fillList(data);
+        logLine(`출동 경로 ${data.missions.length}건 표시`);
+        startPlay(true);
+      } catch (err) {
+        console.error(err);
+        setStatus(String(err.message || err), true);
+        logLine(`오류: ${err.message || err}`);
+      }
+    }
+
+    function fitToMissions(missions) {
+      const pts = [];
+      missions.forEach(m => (m.path || []).forEach(p => pts.push(p)));
+      if (pts.length >= 2) {
+        try {
+          const b = meta.bounds;
+          const clipped = L.latLngBounds(
+            [b.lat_min, b.lng_min], [b.lat_max, b.lng_max]
+          );
+          map.fitBounds(pts, { padding: [40, 40], maxZoom: 14 });
+          // 대구 밖으로 나가지 않게
+          if (!clipped.contains(map.getBounds().getCenter())) {
+            map.fitBounds(clipped, { padding: [8, 8] });
+          }
+        } catch (_) {}
+      }
+    }
+
+    function drawIncidents(data) {
+      incidentLayer.clearLayers();
+      data.incidents.forEach(inc => {
+        L.circleMarker([inc.lat, inc.lng], {
+          radius: 9, color: "#111", weight: 2, fillColor: "#f4e8d8", fillOpacity: 1,
+        }).bindPopup(`<b>I${inc.incident_id}</b> ${inc.type}<br>${inc.label}`).addTo(incidentLayer);
+        L.marker([inc.lat, inc.lng], {
+          icon: L.divIcon({
+            className: "",
+            html: `<div style="font:700 11px sans-serif;background:#1a2332;color:#fff;padding:1px 5px;border-radius:3px">I${inc.incident_id}</div>`,
+            iconSize: [28,16], iconAnchor: [-4, 18],
+          }),
+        }).addTo(incidentLayer);
+      });
+    }
+
+    function fillList(data) {
+      const list = document.getElementById("list");
+      list.innerHTML = "";
+      data.incidents.forEach((inc, idx) => {
+        const related = data.missions.filter(m => m.incident_id === inc.incident_id);
+        const div = document.createElement("div");
+        div.className = "item";
+        div.innerHTML = `<div class="top"><span><span class="${tagClass(inc.type)}">${inc.type}</span> I${inc.incident_id}</span>
+          <button type="button" class="x" data-idx="${idx}">삭제</button></div>
+          <div class="missions">${related.map(m => {
+            const eta = (m.eta_min != null) ? m.eta_min
+              : ((m.edge_times || []).reduce((a, b) => a + Number(b || 0), 0) || null);
+            const etaTxt = (eta != null && !Number.isNaN(Number(eta))) ? Number(eta).toFixed(1) : "-";
+            return `${m.label}: ${m.station_name || "소방서"} → ${m.hospital_name || "화재현장"} (ETA ${etaTxt}분)`;
+          }).join("<br>")}</div>`;
+        list.appendChild(div);
+      });
+      list.querySelectorAll("button.x").forEach(btn => {
+        btn.onclick = () => { incidents.splice(Number(btn.dataset.idx), 1); scheduleDispatch(true); };
+      });
+    }
+
+    function buildFleet(missions) {
+      vehicleLayer.clearLayers();
+      fleet = [];
+      missions.forEach((m, i) => {
+        const path = m.path || [];
+        if (path.length < 2) {
+          console.warn("path too short", m.label, path);
+          return;
+        }
+        const color = COLORS[i % COLORS.length];
+        const marker = L.circleMarker(path[0], {
+          radius: 9, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1,
+          pane: "vehiclePane",
+        }).bindTooltip(m.label).addTo(vehicleLayer);
+        const wp = m.waypoints || {};
+        fleet.push({
+          id: m.id || m.label,
+          label: m.label,
+          vehicle_type: m.vehicle_type,
+          incident_id: m.incident_id,
+          color,
+          path,
+          path_nodes: m.path_nodes || [],
+          edge_times: (m.edge_times && m.edge_times.length) ? m.edge_times.slice()
+            : path.slice(0, -1).map(() => 0.5),
+          edge_speeds: (m.edge_speeds && m.edge_speeds.length) ? m.edge_speeds.slice() : [],
+          edgeIdx: 0,
+          frac: 0,
+          done: false,
+          marker,
+          scene_node: wp.scene_node,
+          hospital_node: wp.hospital_node,
+          goal_node: m.goal_node,
+          dispatch_len: m.dispatch_len || 0,
+          phase: "to_scene",
+          polyline: null,
+          casing: null,
+          needsReroute: false,
+        });
+      });
+    }
+
+    function softUpdateRoutes(missions) {
+      buildFleet(missions);
+    }
+
+    function drawRoutesAndVehicles() {
+      routeLayer.clearLayers();
+      const boundsPts = [];
+      fleet.forEach(v => {
+        if (!v.path || v.path.length < 2) return;
+        v.path.forEach(p => boundsPts.push(p));
+        // 흰 테두리 + 형광 본선 → costmap 위에서도 무조건 보이게
+        v.casing = L.polyline(v.path, {
+          color: "#ffffff", weight: 10, opacity: 0.95, lineJoin: "round", pane: "routePane",
+        }).addTo(routeLayer);
+        v.polyline = L.polyline(v.path, {
+          color: v.color, weight: 6, opacity: 1, lineJoin: "round", pane: "routePane",
+        }).bindPopup(
+          `<b>${v.label}</b><br/>${v.vehicle_type}<br/>hops ${v.path.length - 1}`
+        ).addTo(routeLayer);
+        v.marker.setLatLng(posOnEdge(v));
+        v.marker.bringToFront();
+      });
+      if (!fleet.length) {
+        setStatus("경로를 그릴 차량이 없습니다", true);
+      }
+    }
+
+    function posOnEdge(v) {
+      if (!v.path.length) return [0,0];
+      if (v.edgeIdx >= v.path.length - 1) return v.path[v.path.length - 1];
+      const a = v.path[v.edgeIdx];
+      const b = v.path[v.edgeIdx + 1];
+      const f = v.frac;
+      return [a[0] + (b[0]-a[0])*f, a[1] + (b[1]-a[1])*f];
+    }
+
+    function currentNode(v) {
+      if (!v.path_nodes || !v.path_nodes.length) return null;
+      return v.path_nodes[Math.min(v.edgeIdx, v.path_nodes.length - 1)];
+    }
+
+    function startPlay(force = false) {
+      if (playing && !force) {
+        setStatus(`이미 재생 중 @ ${clockLabel(tMin)}`);
+        return;
+      }
+      if (!fleet.length) {
+        if (incidents.length) {
+          setStatus("배차 후 재생합니다…");
+          scheduleDispatch(true);
+          return;
+        }
+        setStatus("먼저 사고를 찍어주세요", true);
+        return;
+      }
+      // 기존 루프 정리 후 재시작 (중간에 죽은 rAF 복구)
+      stopPlay(false);
+      playing = true;
+      lastTs = performance.now();
+      setStatus(`▶ 재생 중 ${clockLabel(tMin)}`);
+      logLine("시뮬 재생 시작");
+      raf = requestAnimationFrame(function loop(now) {
+        if (!playing) return;
+        try { tick(now); } catch (err) {
+          console.error("tick error", err);
+          setStatus(`재생 오류: ${err.message || err}`, true);
+        }
+        if (playing) raf = requestAnimationFrame(loop);
+      });
+    }
+
+    function stopPlay(updateStatus = true) {
+      playing = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = null;
+      if (playTimer) clearInterval(playTimer);
+      playTimer = null;
+      if (updateStatus) setStatus(`일시정지 @ ${clockLabel(tMin)}`);
+    }
+
+    function tick(now) {
+      if (!playing) return;
+      let dt = (now - lastTs) / 1000;
+      if (!isFinite(dt) || dt < 0) dt = 0.05;
+      // interval+rAF 중복 호출 시 과도한 점프 방지
+      dt = Math.min(Math.max(dt, 0.016), 0.2);
+      lastTs = now;
+
+      const speedEl = document.getElementById("speed");
+      const playbackX = Number(speedEl && speedEl.value ? speedEl.value : 15);
+      // 1x = 실제시간 (edge_times 분 단위)
+      const dSimMin = dt * playbackX / 60.0;
+      tMin = (tMin + dSimMin) % 1440;
+      syncClockUI();
+
+      let liveSpeed = null;
+      let moving = 0;
+      for (const v of fleet) {
+        if (v.done || !v.path || v.path.length < 2) continue;
+        moving += 1;
+        let remain = dSimMin;
+        while (remain > 0 && v.edgeIdx < v.edge_times.length) {
+          const et = Math.max(Number(v.edge_times[v.edgeIdx]) || 0.2, 0.05);
+          if (v.edge_speeds && v.edge_speeds[v.edgeIdx] != null) {
+            liveSpeed = v.edge_speeds[v.edgeIdx];
+          }
+          const left = (1 - v.frac) * et;
+          if (remain >= left) {
+            remain -= left;
+            v.edgeIdx += 1;
+            v.frac = 0;
+          } else {
+            v.frac += remain / et;
+            remain = 0;
+          }
+        }
+        if (v.vehicle_type === "ambulance" && v.phase === "to_scene" && v.dispatch_len != null) {
+          if (v.edgeIdx >= v.dispatch_len && v.phase === "to_scene") {
+            v.phase = "to_hospital";
+            v.goal_node = v.hospital_node;
+            logLine(`${v.label} 현장 도착 → 응급실 이송`);
+          }
+        }
+        if (v.edgeIdx >= v.edge_times.length) {
+          if (!v.done) {
+            v.done = true;
+            v.frac = 0;
+            logLine(`${v.label} 도착 완료`);
+          }
+        }
+        if (v.marker) v.marker.setLatLng(posOnEdge(v));
+      }
+
+      const spdTxt = liveSpeed != null ? ` · GPS ${liveSpeed} km/h` : "";
+      setStatus(`▶ ${clockLabel(tMin)} · ${playbackX}x · 이동 ${moving}/${fleet.length}${spdTxt}`);
+
+      if (Math.abs(tMin - lastCostmapT) >= 5) scheduleCostmap();
+
+      // 재경로는 시뮬 2분마다
+      if (tMin - lastRerouteSimMin >= 2 || lastRerouteSimMin < 0) {
+        lastRerouteSimMin = tMin;
+        maybeReroute();
+      }
+      // 예측 막대는 시뮬 30분마다
+      if (!tick._lastFc || tMin - tick._lastFc >= 30) {
+        tick._lastFc = tMin;
+        refreshForecast();
+      }
+    }
+
+    async function maybeReroute() {
+      const active = fleet.filter(v => !v.done);
+      if (!active.length) return;
+      const payload = {
+        t_min: tMin,
+        vehicles: active.map(v => {
+          const cur = currentNode(v);
+          const remaining = (v.path_nodes || []).slice(v.edgeIdx);
+          return {
+            id: v.id,
+            current_node: cur,
+            goal_node: v.phase === "to_scene" ? v.scene_node : (v.goal_node || v.hospital_node),
+            scene_node: v.scene_node,
+            hospital_node: v.hospital_node,
+            path_nodes: v.path_nodes,
+            remaining_nodes: remaining,
+            vehicle_type: v.vehicle_type,
+            phase: v.phase,
+          };
+        }).filter(x => x.current_node && (x.goal_node || x.scene_node)),
+      };
+      if (!payload.vehicles.length) return;
+      try {
+        const res = await fetch("/api/reroute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...payload,
+            date: getDateParam(),
+            horizon_min: 45,
+          }),
+        });
+        const data = await res.json();
+        let changed = 0;
+        for (const upd of data.vehicles) {
+          const v = fleet.find(x => x.id === upd.id);
+          if (!v || !upd.path || upd.path.length < 2) continue;
+          const rem = (v.path_nodes || []).slice(v.edgeIdx).map(Number);
+          const neu = (upd.path_nodes || []).map(Number);
+          const same = rem.length === neu.length && rem.every((n, i) => n === neu[i]);
+          if (!same) {
+            // 현재 위치에서 이어붙이기 — 진행률 유지하지 않고 새 남은 경로로 교체
+            v.path = upd.path;
+            v.path_nodes = upd.path_nodes;
+            v.edge_times = upd.edge_times;
+            if (upd.edge_speeds) v.edge_speeds = upd.edge_speeds;
+            if (v.vehicle_type === "ambulance" && v.phase === "to_scene" && v.scene_node != null) {
+              const si = v.path_nodes.indexOf(v.scene_node);
+              v.dispatch_len = si >= 0 ? si : v.dispatch_len;
+            } else if (v.phase === "to_hospital") {
+              v.dispatch_len = 0;
+            }
+            v.edgeIdx = 0;
+            v.frac = 0;
+            v.done = false;
+            changed += 1;
+            totalReroutes += 1;
+            logLine(`재경로 ${v.label} · ETA ${upd.eta_min}분`);
+          } else {
+            // 같은 길이면 속도/시간만 갱신 (위치 리셋 금지)
+            v.edge_times = upd.edge_times;
+            if (upd.edge_speeds) v.edge_speeds = upd.edge_speeds;
+          }
+        }
+        document.getElementById("s-rr").textContent = String(totalReroutes);
+        if (changed) drawRoutesAndVehicles();
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+
+    init().catch(err => setStatus(String(err), true));
+  </script>
+</body>
+</html>
