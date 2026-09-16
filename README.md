@@ -6,49 +6,48 @@
 
 ## 한 줄 요약
 
-> **지금 날짜·시각을 기준으로 “앞으로 교통이 얼마나 막힐지”를 예측하고,  
+> **지금 날짜·시각 기준으로 앞으로의 혼잡을 예측하고,  
 > 그 예측으로 소방·구급 출동 경로를 최적화해 골든타임을 줄인다.**
 
-> **경로·혼잡 의사결정의 본체 = 표준노드링크 DiGraph (혼잡가중 최단경로 / 이후 RL 정책).**  
-> 배차·ETA·이동이 이 그래프(또는 학습 정책) 위에 있다.
+의사결정 본체는 **표준노드링크 DiGraph**(혼잡가중 최단경로 → 이후 RL 정책).  
+배차·ETA·이동이 전부 이 그래프(또는 학습 정책) 위에 있다.
 
-> **언제 온라인이고 언제 오프라인인가**  
-> - **안심구역 = 학습·ITS 가공만** (인터넷 차단) → `ROUTING_ENGINE=graph`, 공개 OSRM·카카오 경로 API **호출 없음**  
-> - **밖(온라인) = 관제 시연·결과 보기** → 지도 타일·(선택) OSRM/교통 API로 화면을 풍부하게 해도 됨
+| 장소 | 하는 일 | 경로 |
+|---|---|---|
+| **안심구역** | 학습·ITS 가공 (오프라인) | `ROUTING_ENGINE=graph` only |
+| **밖(온라인)** | 관제 시연·지도 | graph 기본, 선택적으로 OSRM·교통 API |
 
-### 경로 엔진 한 줄 정리 (발표용)
+> **학습은 안심구역에서, 관제 화면은 밖에서.** 안심구역 안에서는 공개 OSRM을 경로 본체로 쓰지 않는다.
 
-| 단계 | 네트워크 | 경로 엔진 | 말하는 법 |
-|---|---|---|---|
-| **학습 (안심구역)** | 오프라인 | **DiGraph** (+ RL) | 혼잡이 엣지 비용·정책에 들어가 **길을 고른다** |
-| **시연·관제 (온라인)** | 인터넷 OK | graph 기본, 원하면 `osrm` | OSRM은 **도로 곡선·주행 기하** 보강. 혼잡 예측·배차 논리는 여전히 우리 쪽 |
+---
 
-> 한 문장: **학습은 안심구역에서 오프라인으로 돌리고, 나중에 온라인에서 관제 화면으로 본다. 안심구역 안에서는 공개 OSRM을 경로 본체로 쓰지 않는다.**
+## 지금 상태 (체크리스트)
 
-지금 **보여주기(관제 데모)** 단계이고, 이후 안심구역 ITS + RL 학습으로 같은 자리를 학습 모델이 대체한다.
+| 항목 | 상태 | 비고 |
+|---|---|---|
+| 도로망 (표준노드링크) | ✅ | ITS SHP → 대구 CSV **노드 ~37k / 링크 ~52k** (포털 샘플보다 촘촘) |
+| 웹 관제 데모 | ✅ | `python dispatch_web.py` → `http://127.0.0.1:5050` |
+| 혼잡 시간통계 | △ | `link_hourly_stats.csv` 샘플 → **포털 원본 교체 권장** |
+| 119안전센터 | ✅ | `data/open/safety_centers_119.csv` |
+| 긴급차 진출입로 | △ | CSV 스키마만 — 포털 원본 필요 |
+| 돌발 API | ✅ (키 있으면) | `.env`의 `DAEGU_INCIDENT_API_URL` |
+| RL 재학습 | ☐ | 도로망이 바뀌었으므로 **그래프 데모는 즉시**, PPO는 `train.py` 다시 |
 
-### 오프라인·안심구역용 도로망 (촘촘하게)
+### 도로망을 다시 만들 때 (이미 반영됨 · 재현용)
 
-학습은 인터넷 없이 돌아가야 하므로, **미리 받아 두는 오픈 도로망**이 본체다.
-
-| 우선순위 | 데이터 | 오프라인 | 촘촘함 | 혼잡/linkspeed 매칭 |
-|---|---|---|---|---|
-| **1 (권장)** | [ITS 전국 표준노드링크 SHP](https://www.its.go.kr/nodelink/nodelinkRef) | ✅ 한 번 다운로드 | 포털 대구 CSV보다 **더 촘촘** | ✅ 표준링크ID |
-| 2 | 지금 `data/standard_node_link/*.csv` | ✅ | 보통 | ✅ |
-| 3 | OSM PBF + 로컬 OSRM | ✅ (미리 받아두면) | **골목 최강** | ❌ ID 다름 · 혼잡은 별도 |
-
-**권장 절차 (안심구역 들어가기 전):**
+ITS는 **스냅샷 1회**면 된다 (1년치 시계열이 아님). 전국 SHP(~800MB)는 저장소에 넣지 않는다.
 
 ```bash
-# 1) 브라우저에서 ITS 표준노드링크 최신 ZIP 받기
-#    https://www.its.go.kr/nodelink/nodelinkRef
-# 2) MOCT_NODE.shp / MOCT_LINK.shp 를 data/standard_node_link/ 에 둠
-python build_dense_backbone.py
-# → daegu_nodes.csv / daegu_links.csv 를 대구만 잘라 촘촘하게 덮어씀
+# 1) https://www.its.go.kr/nodelink/nodelinkRef 에서 최신 NODELINKDATA ZIP
+# 2) 압축 해제 → MOCT_NODE.shp / MOCT_LINK.shp
+python build_dense_backbone.py --shp-dir path/to/NODELINKDATA
+# → data/standard_node_link/daegu_{nodes,links}.csv 덮어씀 (기존은 .bak)
 ```
 
-골목까지 “내비처럼”이 목표면 OSM이 답이고, **예측·학습·linkspeed와 한 파이프**로 가려면 ITS 표준노드링크가 맞다.  
-(표준노드링크는 원래 교통정보 교환용이라 모든 골목을 담진 않음 — 그 한계는 README에 명시.)
+| 선택 | 촘촘함 | 혼잡·linkspeed ID |
+|---|---|---|
+| **ITS 표준노드링크 (현재)** | 포털 대구 CSV보다 촘촘 | ✅ 맞음 |
+| OSM + 로컬 OSRM | 골목 최강 | ❌ ID 다름 → 학습 본체 비권장 |
 
 ---
 
@@ -121,26 +120,30 @@ python build_dense_backbone.py
 
 | 단계 | 역할 |
 |---|---|
-| **지금 (표현/데모)** | 웹 관제 + **오픈데이터** 시간대 속도 예측 + 혼잡가중 경로 |
-| **나중 (학습)** | 오픈 통계(+선택 ITS)로 혼잡·경로 정책을 학습 (PPO) |
+| **지금 (관제 데모)** | 촘촘한 표준노드링크 + 오픈 속도통계 + **혼잡가중 Dijkstra** |
+| **다음 (재학습)** | 같은 그래프에서 `train.py` → PPO가 경로 자리를 대체 |
+| **안심구역** | 경북대 ITS 15분 교통량으로 예측·정책을 한 단계 더 보강 |
 
-데모와 학습은 **같은 문제 정의**를 공유한다. 데모의 예측·경로 자리를 나중에 학습 모델이 채운다.
+데모와 학습은 **같은 문제 정의**를 공유한다.
 
 ---
 
-## 2. 지금 바로 돌려보기 (표현용)
+## 2. 지금 바로 돌려보기
 
 ### 웹 중앙관제 (권장)
 
 ```bash
 python dispatch_web.py
-# 브라우저: http://127.0.0.1:5050  (또는 실행 로그에 나온 포트)
+# 브라우저: http://127.0.0.1:5050
 ```
 
-- **화면 시계 = 지금(로컬)** — 미래로 시간이 흐르지 않음. 배속은 **차량 추적**만 빠르게
-- **혼잡 예측**은 경로 비용·재경로용(향후 몇 시간 패턴). 내비 전망 화면과는 별개
-- 지도 클릭으로 사고 추가 (여러 곳), 유형별 출동, **그래프 링크(홉) 단위** GPS식 이동, 경로 겹침 회피, 혼잡 변화 시 재경로
-- 교통량 도로색: 파랑 → 빨강 (아래 **4-3** 참고)
+도로망 CSV를 바꾼 뒤에는 **웹을 한 번 재시작**해야 새 그래프가 로드된다.
+
+- **화면 시계 = 지금(로컬)** — 배속은 차량 추적만 빠르게
+- **혼잡 예측** = 경로 비용·재경로용 (향후 몇 시간 패턴)
+- 클릭 = 사고 추가, 유형별 출동, 그래프 홉 단위 이동, 경로 겹침 회피, 재경로
+- 교통색: 파랑 → 빨강 (**§4-3**)
+- (선택) 돌발·공사 마커: `.env`에 돌발 API 설정 후 재시작
 
 ### CLI 시뮬레이터 (GIF)
 
@@ -163,15 +166,27 @@ python dispatch_center.py --incident fire_1:35.87,128.60 --incident medical_1:35
 | `mixed_2` | 화재+인명 | 소방 1 + 구급 1 |
 | `mixed_major` | 대형복합 | 소방 2 + 구급 2 |
 
-### 끝까지 검증 (`benchmark_validate.py`)
+### RL 재학습 (도로망 갱신 후)
 
-피드백 1~4순위를 **같은 스크립트**로 돌린다. 결과는 `benchmark_results.json`.
+그래프 규모·링크 ID가 바뀌었으므로 **예전 `emergency_ppo.zip`은 쓰지 말고** 다시 학습한다.  
+Dijkstra 관제만 쓸 때는 재학습 불필요.
+
+```bash
+python train.py --timesteps 300000
+# 평가
+python evaluate.py --model-path emergency_ppo.zip
+python benchmark_validate.py --n 100 --model-path emergency_ppo.zip
+```
+
+### 검증 벤치마크 (`benchmark_validate.py`)
+
+1~4순위를 한 스크립트로. 결과: `benchmark_results.json`.
 
 ```bash
 python benchmark_validate.py --n 100
-python train.py --timesteps 100000          # 2순위용 모델
+python train.py --timesteps 100000
 python benchmark_validate.py --n 100 --model-path emergency_ppo.zip
-python benchmark_validate.py --n 100 --data-dir /path/to/경북대ITS   # 1순위 ITS 비교
+python benchmark_validate.py --n 100 --data-dir /path/to/경북대ITS
 ```
 
 | 순위 | 무엇 | 지금(오픈만) | 안심구역 전역 데이터 있을 때 |
@@ -215,28 +230,27 @@ python demo_live_incident.py --seed 7 --hospital 0 --save live_incident.gif --no
   · ITS 실제 교통량으로 같은 문제를 RL 학습
 ```
 
-지도 뼈대는 **대구 표준노드링크** (`data/standard_node_link/`).  
-클릭 위치는 배경 OSM과 100% 일치하지 않을 수 있고, **우리 도로 그래프의 최근접 노드로 스냅**된다.
+지도 뼈대는 **대구 표준노드링크** (`data/standard_node_link/daegu_*.csv`, ITS SHP에서 추출).  
+클릭은 배경 OSM과 어긋날 수 있고, **경로 탐색은 그래프 최근접 노드로 스냅**된다 (마커·현장 표시 좌표는 클릭 유지).
 
 ---
 
-## 4. 데이터 — **오픈데이터 필수**
+## 4. 데이터
 
-이 프로젝트의 기본 축은 **공공데이터포털 오픈데이터**다.  
-안심구역 경북대 ITS는 있을 때만 보강한다.
+기본 축 = **오픈데이터**. 안심구역 경북대 ITS는 있을 때만 보강.
 
-### 4-1. 필수 오픈데이터
+### 4-1. 로컬 파일·API
 
-| 용도 | 데이터 | 로컬 경로 | 링크 |
+| 용도 | 로컬 | 출처 | 상태 |
 |---|---|---|---|
-| 도로망 | 대구 표준노드/링크 | `data/standard_node_link/` | [노드](https://www.data.go.kr/data/15049953/fileData.do) · [링크](https://www.data.go.kr/data/15049952/fileData.do) |
-| 혼잡 예측 | 링크별 시간별 통계 (속도) | `data/open/link_hourly_stats.csv` | [15117329](https://www.data.go.kr/data/15117329/fileData.do) |
-| 소방 출발 | 소방서 좌표 | `data/open/fire_stations.csv` | 소방청 공개 좌표 등 |
-| 119센터 | 119안전센터 공간정보 | `data/open/safety_centers_119.csv` (SHP→변환) | [15117114](https://www.data.go.kr/data/15117114/fileData.do) |
-| 단지 진입 | 긴급차 진출입로(500세대↑) | `data/open/emergency_entrances_daegu.csv` | [15156867](https://www.data.go.kr/data/15156867/fileData.do) |
-| 병원 이송 | 응급의료기관 현황 + 좌표 | `data/open/er_hospitals.csv` | [15132528](https://www.data.go.kr/data/15132528/fileData.do) |
-| (선택) 실시간 | 교통소통정보(신) API | `.env` 의 `DAEGU_TRAFFIC_API_KEY` | [15126266](https://www.data.go.kr/data/15126266/openapi.do) |
-| (선택) 돌발 | 돌발 교통정보(신) API `/dgincident` | 동일 키 + `DAEGU_INCIDENT_API_URL` | [15126267](https://www.data.go.kr/data/15126267/openapi.do) |
+| 도로망 | `data/standard_node_link/daegu_*.csv` | [ITS SHP](https://www.its.go.kr/nodelink/nodelinkRef) → `build_dense_backbone.py` (대안: [포털 노드](https://www.data.go.kr/data/15049953/fileData.do)·[링크](https://www.data.go.kr/data/15049952/fileData.do)) | ✅ 촘촘본 |
+| 혼잡 예측 | `data/open/link_hourly_stats.csv` | [15117329](https://www.data.go.kr/data/15117329/fileData.do) | △ 샘플 → 원본 교체 |
+| 소방 출발 | `data/open/fire_stations.csv` | 소방청 공개 좌표 등 | ✅ |
+| 119센터 | `data/open/safety_centers_119.csv` | [15117114](https://www.data.go.kr/data/15117114/fileData.do) | ✅ |
+| 단지 진입 | `data/open/emergency_entrances_daegu.csv` | [15156867](https://www.data.go.kr/data/15156867/fileData.do) | △ 스키마만 |
+| 병원 이송 | `data/open/er_hospitals.csv` | [15132528](https://www.data.go.kr/data/15132528/fileData.do) + 좌표 | ✅ |
+| 실시간 소통 | `.env` | [15126266](https://www.data.go.kr/data/15126266/openapi.do) | 선택 |
+| 돌발 | `.env` | [15126267](https://www.data.go.kr/data/15126267/openapi.do) | 선택 |
 
 실시간·돌발 API 설정 (`.env`) — 온라인 시연용  
 ([소통 linkspeed](https://www.data.go.kr/data/15126266/openapi.do) · [돌발 dgincident](https://www.data.go.kr/data/15126267/openapi.do)):
@@ -432,7 +446,8 @@ r \;=\; r_{\mathrm{step}}
 
 - 토폴로지(불변) / 혼잡(가변)  
 - 에피소드마다 차종·목표·시간대를 바꿔 **goal-conditioned** 일반화  
-- `python train.py --timesteps 300000` (기본: 소방+구급 혼합)
+- `python train.py --timesteps 300000` (소방+구급 혼합)  
+- **도로망 CSV를 ITS로 갱신한 뒤에는 반드시 재학습** (관측은 로컬 이웃이라 차원은 같지만, 그래프·정책 분포가 바뀜)
 
 ---
 
@@ -449,26 +464,92 @@ r \;=\; r_{\mathrm{step}}
 
 ## 7. 한계 (발표용 정직 문구)
 
-- ITS에 **사고 발생 좌표 테이블 없음** → 현장은 교차로/노드 스냅 근사  
-- **응급실 병상 실시간 없음** → 병원은 비용·부하 분산으로 선정, AI는 경로 중심  
-- 표준노드링크가 OSM 전 골목과 1:1은 아님 → 시설·그래프 경로는 최근접 노드 기준. **I마커·현장 = 클릭 좌표** (스냅으로 옮기지 않음)  
-- 소방서·병원 아이콘은 **실제 좌표**, 출동 경로는 **스냅 노드**에서 시작/종료  
-- 지도 교통색은 **전 도로 연속**이 아니라 API·통계·표시 한도의 **우선 샘플** (자세히 **§4-3**)  
-- 링크 시간통계 샘플은 포털 원본으로 교체 권장. 실시간 API·전국 병상 API는 키 발급 후 연결  
-- 안심구역 PC는 오프라인 → 카카오내비 대신 **자체 관제 지도/전광 연동** 제안
+- ITS에 **사고 발생 좌표 테이블 없음** → 경로는 노드 스냅, **마커·현장 = 클릭 좌표**  
+- **응급실 병상 실시간 없음** → 병원은 비용·부하 분산, AI는 경로 중심  
+- 표준노드링크 ≠ OSM 전 골목 (교통정보 교환용) — 골목 100%는 OSM이지만 혼잡 ID가 깨짐  
+- 소방서·병원 아이콘 = **실제 좌표**, 출동 경로 = **스냅 노드** 기준  
+- 지도 교통색 = 전 도로 연속이 아니라 API·통계·표시 한도의 **우선 샘플** (**§4-3**)  
+- `link_hourly_stats` 샘플 → 포털 원본 교체 권장  
+- 안심구역 = 오프라인 → 카카오내비 대신 **자체 관제**
 
 ---
 
-## 8. 주요 파일
+## 8. 코드·파일 역할
+
+### 8-1. 관제·출동 시뮬
 
 | 파일 | 역할 |
 |---|---|
-| `dispatch_web.py` + `templates/dispatch_live.html` | 실시간 웹 관제 |
-| `congestion_time.py` | 날짜·시간·연휴 혼잡 예측 + costmap |
-| `dispatch_center.py` | CLI 다중 사고 배차·GIF |
-| `network_graph.py` / `standard_node_link.py` | 대구 실도로 그래프 |
-| `daegu_ems_geo.py` | 오픈 소방서·응급실 좌표 로더 |
-| `daegu_open_data.py` | 공공데이터 CSV/API 로더 |
-| `build_open_speed_profile.py` | 링크 시간통계 → 속도 프로파일 |
-| `env.py` / `train.py` / `evaluate.py` | RL 환경·학습·평가 |
-| `demo_fire_dispatch.py` / `demo_live_incident.py` | 단일 시나리오 데모 |
+| `dispatch_web.py` | Flask 웹 서버. 그래프 로드, 사고 접수 API, 배차·경로·ETA·차량 틱 진행, 혼잡/돌발 오버레이 JSON 제공. 기본 포트 5050. |
+| `templates/dispatch_live.html` | 관제 UI (Leaflet). 클릭=현장, 사고 유형 선택, 경로·차량·혼잡색·돌발 표시, 배속 추적. |
+| `static/leaflet/` | 오프라인·차단망용 로컬 Leaflet (CDN 없이 지도 UI). |
+| `dispatch_center.py` | CLI 다중 사고 배차 엔진. Prioritized Planning(경로 겹침 페널티), 잔여 대수, 재경로, GIF 저장. 웹도 이 로직을 공유. |
+
+### 8-2. 도로망·경로
+
+| 파일 | 역할 |
+|---|---|
+| `standard_node_link.py` | 표준노드/링크 CSV·(선택) MOCT SHP 로드 → NetworkX DiGraph. 대구 bbox 클립, 최근접 노드 스냅, 합성 백본 fallback. |
+| `network_graph.py` | 관제·학습용 그래프 조립. 백본 + 혼잡/속도 가중, 소방서·병원 매핑, 엣지 travel time. |
+| `build_dense_backbone.py` | ITS `MOCT_NODE`/`MOCT_LINK` SHP에서 대구만 잘라 `daegu_nodes.csv`·`daegu_links.csv` 생성. |
+| `osrm_router.py` | (선택) OSRM HTTP 라우팅. `ROUTING_ENGINE=osrm`일 때 곡선·기하 보강. 안심구역 학습 본체 아님. |
+| `road_shapes.py` | 엣지 폴리라인 캐시 로드/조회 (`edge_shapes.json`). |
+| `build_road_shapes.py` | (선택) OSRM 등으로 링크 곡선을 미리 뽑아 `data/open/edge_shapes.json` 생성. |
+
+### 8-3. 데이터 로더·가공
+
+| 파일 | 역할 |
+|---|---|
+| `daegu_open_data.py` | 오픈데이터 상태 점검, `link_hourly_stats`·속도 프로파일, **linkspeed**·**dgincident(돌발)** API 호출·매칭. |
+| `daegu_ems_geo.py` | 소방서·응급실 좌표 CSV 로드 및 그래프 노드 매핑. |
+| `ems_extra_geo.py` | 119안전센터 SHP→CSV, 긴급차 진출입로 CSV 정리·스냅 보조. |
+| `build_open_speed_profile.py` | `link_hourly_stats.csv` → `hourly_speed_profile.json` (시간대 속도 캐시). |
+| `congestion_time.py` | 평일/주말/추석·설 캘린더 + 속도 프로파일 → **향후 혼잡 예측**, 경로 cost, 지도용 파랑→빨강 costmap. |
+
+### 8-4. 강화학습
+
+| 파일 | 역할 |
+|---|---|
+| `env.py` | `EmergencyRouteEnv` 등 Gym 환경. 관측 24차원, 행동 Discrete(5), 소방/구급 phase·보상. |
+| `policy.py` | PPO용 `SharedBodyExtractor` (24→128→128→64). Actor/Critic이 공유하는 특징 body. |
+| `train.py` | Stable-Baselines3 PPO 학습 엔트리. `--timesteps`, `--data-dir`, 혼합 차종. 산출물 `emergency_ppo.zip`. |
+| `evaluate.py` | 학습 정책 vs Dijkstra 등 평가 스크립트. |
+
+### 8-5. 검증·데모·테스트
+
+| 파일 | 역할 |
+|---|---|
+| `benchmark_validate.py` | 피드백 1~4순위(예측 MAE, PPO vs Dijkstra, 혼잡회피, 다중차량 겹침) 일괄 검증 → `benchmark_results.json`. |
+| `demo_fire_dispatch.py` | 소방차 단일 시나리오 CLI 데모 (GIF). |
+| `demo_live_incident.py` | 구급차(현장→병원) 단일 시나리오 CLI 데모. |
+| `demo_showcase.py` | 쇼케이스용 통합 데모 스크립트. |
+| `test_traffic_api.py` | `.env` 소통(linkspeed) API 스모크 테스트. |
+| `test_incident_api.py` | `.env` 돌발(dgincident) API 스모크 테스트. |
+
+### 8-6. 설정·데이터 디렉터리
+
+| 경로 | 역할 |
+|---|---|
+| `.env` / `.env.example` | API 키·URL, `ROUTING_ENGINE` 등. **`.env`는 git 제외**. |
+| `data/standard_node_link/` | `daegu_nodes.csv`·`daegu_links.csv` (학습·관제 본체). `NODELINKDATA/` 전국 SHP는 로컬 전용·gitignore. |
+| `data/open/` | 속도통계·소방서·119·병원·fleet·프로파일 등 오픈 배치. 안내: `data/open/README.md`. |
+| `data/대구광역시119공간센터/` | 119센터 원본 SHP (→ `safety_centers_119.csv`). |
+
+### 8-7. 의존 관계 (한눈에)
+
+```
+표준노드링크 CSV ← build_dense_backbone.py ← ITS MOCT SHP
+        │
+        ▼
+standard_node_link.py → network_graph.py
+        │                      │
+        │                      ├─ congestion_time.py ← daegu_open_data.py
+        │                      ├─ daegu_ems_geo.py / ems_extra_geo.py
+        │                      └─ (선택) osrm_router.py / road_shapes.py
+        ▼
+dispatch_center.py ←── dispatch_web.py + templates/dispatch_live.html
+        │
+        ▼
+env.py → train.py / evaluate.py / benchmark_validate.py
+```
+
