@@ -537,9 +537,10 @@ def plan_global_dispatch(
     verbose: bool = True,
     fleet: StationFleet | None = None,
 ) -> list[dict]:
-    """OSRM을 본체: 배차·경로·ETA가 동일 응답.
+    """배차·경로·ETA.
 
-    ROUTING_ENGINE=graph 이면 예전 표준노드 다익스트라로 폴백.
+    기본(ROUTING_ENGINE=graph): 표준노드링크 혼잡가중 최단경로 (오프라인).
+    ROUTING_ENGINE=osrm 이고 로컬 OSRM 가능하면 OSM driving 본체.
     """
     from osrm_router import apply_congestion_factor, use_osrm
     from road_shapes import haversine_m

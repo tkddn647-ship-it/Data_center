@@ -1,10 +1,10 @@
 """
 osrm_router.py
 ==============
-출동 경로의 단일 진실 소스(OSRM / OSM driving).
+선택적 OSM driving 라우터 (로컬 osrm-backend 또는 공개 데모).
 
-배차 선택 · ETA · 지도 polyline · 차량 이동이 모두 같은 응답을 쓴다.
-표준노드링크는 혼잡 보정·costmap 표시용으로만 쓴다.
+기본 엔진은 표준노드링크 DiGraph (`ROUTING_ENGINE=graph`).
+안심구역(인터넷 차단)에서는 graph만 쓰고, OSRM은 로컬에 띄운 뒤에만 켠다.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from functools import lru_cache
 
 from road_shapes import fetch_osrm_route, haversine_m
 
-# 환경변수 ROUTING_ENGINE=osrm|graph  (기본 osrm)
-ROUTING_ENGINE = os.environ.get("ROUTING_ENGINE", "osrm").strip().lower()
+# 환경변수 ROUTING_ENGINE=graph|osrm  (기본 graph = 오프라인/안심구역)
+ROUTING_ENGINE = os.environ.get("ROUTING_ENGINE", "graph").strip().lower()
 
 
 def use_osrm() -> bool:
-    return ROUTING_ENGINE not in ("graph", "node", "standard")
+    return ROUTING_ENGINE in ("osrm", "osm", "online")
 
 
 def route_latlng(

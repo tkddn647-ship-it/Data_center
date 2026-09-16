@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>대구 응급 중앙관제 · 실시간</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/static/leaflet/leaflet.css" />
+  <script src="/static/leaflet/leaflet.js"></script>
   <style>
     :root {
       --ink: #1a2332; --muted: #5c6b7a; --panel: #f7f4ef; --line: #d5cfc4;
@@ -258,6 +258,10 @@
     }
 
     async function init() {
+      if (typeof L === "undefined") {
+        setStatus("지도 라이브러리(Leaflet) 로드 실패 — /static/leaflet 확인", true);
+        return;
+      }
       meta = await (await fetch("/api/meta")).json();
       document.getElementById("clock-src").textContent = meta.congestion_source || "";
       syncWallClock(false);
@@ -274,9 +278,9 @@
       }, 60000);
 
       const sel = document.getElementById("itype");
-      for (const [k, v] of Object.entries(meta.presets)) {
+      for (const [k, v] of Object.entries(meta.presets || {})) {
         const opt = document.createElement("option");
-        opt.value = k; opt.textContent = `${k} — ${v.label}`;
+        opt.value = k; opt.textContent = `${k} - ${(v && v.label) || k}`;
         if (k === "medical_1") opt.selected = true;
         sel.appendChild(opt);
       }
@@ -298,38 +302,41 @@
       );
 
       map = L.map("map", {
-        maxBounds: daeguBounds.pad(0.02),
-        maxBoundsViscosity: 1.0,
-        minZoom: 11,
+        maxBounds: daeguBounds.pad(0.08),
+        maxBoundsViscosity: 0.8,
+        minZoom: 10,
         maxZoom: 17,
       });
       map.fitBounds(daeguBounds, { padding: [8, 8] });
 
-      // 배경: OSM (Carto는 API키 필요해 깨짐)
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      // 배경 타일: OSM (실패해도 costmap·시설은 보임)
+      const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap",
         maxZoom: 19,
-        bounds: daeguBounds,
-        noWrap: true,
-      }).addTo(map);
-      // 타일 실패해도 도로색이 보이게 배경색
+        errorTileUrl: "",
+      });
+      tiles.on("tileerror", () => {
+        document.getElementById("map").style.background = "#c5d0c8";
+      });
+      tiles.addTo(map);
       document.getElementById("map").style.background = "#dfe6e0";
 
-      // 대구 밖은 패널색으로 가려서 costmap만 보이게
-      const worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180]];
-      const daeguHole = [
-        [b.lat_min, b.lng_min],
-        [b.lat_min, b.lng_max],
-        [b.lat_max, b.lng_max],
-        [b.lat_max, b.lng_min],
-      ];
-      L.polygon([worldRing, daeguHole], {
-        stroke: false,
-        fillColor: "#e8e2d8",
-        fillOpacity: 0.92,
-        interactive: false,
-        pane: "mapPane",
-      }).addTo(map);
+      // 대구 밖 마스크는 옅게 (구멍 감기 오류로 전체가 가려지던 문제 방지)
+      try {
+        const worldRing = [[-90, -180], [-90, 180], [90, 180], [90, -180]];
+        const daeguHole = [
+          [b.lat_min, b.lng_min],
+          [b.lat_max, b.lng_min],
+          [b.lat_max, b.lng_max],
+          [b.lat_min, b.lng_max],
+        ];
+        L.polygon([worldRing, daeguHole], {
+          stroke: false,
+          fillColor: "#e8e2d8",
+          fillOpacity: 0.55,
+          interactive: false,
+        }).addTo(map);
+      } catch (_) {}
       L.rectangle(daeguBounds, {
         color: "#1a2332", weight: 1.5, opacity: 0.45,
         fill: false, interactive: false,

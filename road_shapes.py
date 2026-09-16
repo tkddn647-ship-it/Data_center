@@ -29,9 +29,10 @@ MIN_CHORD_M = 90.0
 # (시내 간선은 노드 간격이 길 수 있어 280m는 과하게 잘림 → 완화)
 MAX_COSTMAP_CHORD_M = float(os.environ.get("COSTMAP_MAX_CHORD_M", "480"))
 
+# 기본은 로컬 osrm-backend. 공개 project-osrm 은 안심구역에서 사용 금지.
 OSRM_URL = os.environ.get(
     "OSRM_URL",
-    "https://router.project-osrm.org/route/v1/driving",
+    "http://127.0.0.1:5000/route/v1/driving",
 )
 
 

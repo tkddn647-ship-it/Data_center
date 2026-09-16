@@ -1,0 +1,40 @@
+{
+  "n_scenarios": 30,
+  "seed": 0,
+  "1_prediction_open": {
+    "status": "ok",
+    "source": "open_link_hourly_holdout",
+    "n_test": 840,
+    "mae_kmh": 9.725,
+    "rmse_kmh": 11.06,
+    "note": "오픈 통계만으로 시간대 속도 예측 holdout. ITS 전역 실측과 비교하려면 --data-dir"
+  },
+  "1_prediction_its": {
+    "status": "pending",
+    "reason": "안심구역 전역 데이터 경로 없음 (--data-dir)",
+    "how": "같은 링크·시간으로 오픈 예측 vs ITS 실측 MAE를 나란히 보고, 오차 감소 %p 를 발표 숫자로 씀"
+  },
+  "2_rl_vs_dijkstra": {
+    "status": "pending",
+    "reason": "emergency_ppo.zip 없음 — python train.py 후 --model-path 로 재실행",
+    "baseline_hint": "Dijkstra(혼잡가중 greedy) 단독 수치는 아래 congestion_avoid 참고"
+  },
+  "3_congestion_avoid": {
+    "status": "ok",
+    "n": 30,
+    "mean_plain_cost": 12.18,
+    "mean_aware_cost": 12.09,
+    "mean_improve_pct": 1.07,
+    "median_improve_pct": 0.0,
+    "pct_scenarios_aware_better": 13.3,
+    "note": "양수=혼잡가중 경로가 혼잡반영 비용에서 더 좋음"
+  },
+  "4_multi_overlap": {
+    "status": "ok",
+    "n": 30,
+    "mean_overlap_naive": 43.63,
+    "mean_overlap_prioritized": 3.43,
+    "reduce_pct": 92.13,
+    "note": "겹침=여러 대가 같은 방향 엣지를 공유한 횟수 합"
+  }
+}
