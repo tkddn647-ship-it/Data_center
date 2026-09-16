@@ -28,6 +28,8 @@ dispatch_center.py
 
 from __future__ import annotations
 import argparse
+import heapq
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
@@ -180,30 +182,188 @@ def resolve_incidents(G: nx.DiGraph, args) -> list[Incident]:
 # ---------------------------------------------------------------------- #
 # 3) 전역 배정 최적화 — 소방서 / 응급실 / 경로 겹침
 # ---------------------------------------------------------------------- #
-STATION_REUSE_PENALTY = 25.0   # 같은 소방서를 또 쓰면 비용↑ (가능하면 다른 서 출동)
+EMPTY_STATION_PENALTY = 1e6    # 잔여 0인 서는 사실상 제외 (전 서 고갈 시에만 허용)
 HOSPITAL_LOAD_PENALTY = 18.0   # 같은 응급실로 여러 대 몰리면 비용↑
 OVERLAP_PENALTY = 18.0         # 같은 도로 동시 사용 강하게 회피 (응급차 충돌 방지)
+ALLEY_FACTOR = 1.55            # ~길 / 번길 은 간선보다 비싸게 (빙빙 골목 억제)
+TURN_PENALTY = 1.15            # 급커브(분 단위 가산) — 지그재그 억제
+U_TURN_PENALTY = 3.0
+EMPTY_STATION_PENALTY = 1e6    # 잔여 0인 서는 사실상 제외 (전 서 고갈 시에만 허용)
+
+
+@dataclass
+class StationFleet:
+    """소방서별 보유·잔여 차량. 119 구급은 소방서에서만 출발(병원 출발 아님)."""
+    capacity_amb: dict[int, int] = field(default_factory=dict)
+    capacity_fire: dict[int, int] = field(default_factory=dict)
+    avail_amb: dict[int, int] = field(default_factory=dict)
+    avail_fire: dict[int, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_stations(cls, stations: list[dict] | None = None) -> "StationFleet":
+        stations = stations if stations is not None else DAEGU_FIRE_STATIONS
+        fle = cls()
+        for s in stations:
+            sid = int(s["station_id"])
+            amb = int(s.get("ambulances", 4) or 4)
+            fire = int(s.get("fire_trucks", 4) or 4)
+            fle.capacity_amb[sid] = amb
+            fle.capacity_fire[sid] = fire
+            fle.avail_amb[sid] = amb
+            fle.avail_fire[sid] = fire
+        return fle
+
+    def available(self, station_id: int, vehicle_type: str) -> int:
+        if vehicle_type == "ambulance":
+            return int(self.avail_amb.get(station_id, 0))
+        return int(self.avail_fire.get(station_id, 0))
+
+    def take(self, station_id: int, vehicle_type: str) -> bool:
+        """출동 1대 차감. 잔여 없으면 False."""
+        bag = self.avail_amb if vehicle_type == "ambulance" else self.avail_fire
+        if bag.get(station_id, 0) <= 0:
+            return False
+        bag[station_id] -= 1
+        return True
+
+    def release(self, station_id: int, vehicle_type: str) -> None:
+        """복귀 시 1대 환원 (보유 상한 초과 금지)."""
+        if vehicle_type == "ambulance":
+            cap, bag = self.capacity_amb, self.avail_amb
+        else:
+            cap, bag = self.capacity_fire, self.avail_fire
+        bag[station_id] = min(cap.get(station_id, 0), bag.get(station_id, 0) + 1)
+
+    def snapshot(self, station_names: dict[int, str] | None = None) -> list[dict]:
+        names = station_names or {}
+        rows = []
+        for sid in sorted(set(self.capacity_amb) | set(self.capacity_fire)):
+            rows.append({
+                "station_id": sid,
+                "station_name": names.get(sid, f"station#{sid}"),
+                "ambulances": {
+                    "capacity": self.capacity_amb.get(sid, 0),
+                    "available": self.avail_amb.get(sid, 0),
+                    "out": self.capacity_amb.get(sid, 0) - self.avail_amb.get(sid, 0),
+                },
+                "fire_trucks": {
+                    "capacity": self.capacity_fire.get(sid, 0),
+                    "available": self.avail_fire.get(sid, 0),
+                    "out": self.capacity_fire.get(sid, 0) - self.avail_fire.get(sid, 0),
+                },
+            })
+        return rows
+
+    def totals(self) -> dict:
+        return {
+            "ambulances": {
+                "capacity": sum(self.capacity_amb.values()),
+                "available": sum(self.avail_amb.values()),
+            },
+            "fire_trucks": {
+                "capacity": sum(self.capacity_fire.values()),
+                "available": sum(self.avail_fire.values()),
+            },
+        }
+
+
+def _is_alley(road: str) -> bool:
+    r = (road or "").strip()
+    if not r:
+        return False
+    return r.endswith("길") or "번길" in r
 
 
 def _edge_cost(u, v, d) -> float:
-    return float(d.get("travel_time", 1.0)) * (1.0 + float(d.get("congestion", 0.0)))
+    tt = float(d.get("travel_time", 1.0))
+    length_m = max(float(d.get("length_m", 400.0)), 20.0)
+    # API/통계 오매칭으로 travel_time만 비정상이면 골목·블록순회 우회가 생김
+    sensible_min = (length_m / 1000.0) / 70.0 * 60.0
+    sensible_max = (length_m / 1000.0) / 8.0 * 60.0
+    tt = min(max(tt, sensible_min * 0.4), sensible_max)
+    base = tt * (1.0 + float(d.get("congestion", 0.0)))
+    if _is_alley(str(d.get("road_name") or "")):
+        base *= ALLEY_FACTOR
+    return base
+
+
+def _bearing(G: nx.DiGraph, a, b) -> float:
+    return math.atan2(
+        G.nodes[b]["lng"] - G.nodes[a]["lng"],
+        G.nodes[b]["lat"] - G.nodes[a]["lat"],
+    )
+
+
+def _turn_extra(G: nx.DiGraph, prev, u, v) -> float:
+    """50° 이상 꺾이면 페널티 — 성긴 노드를 지그재그로 잇는 경로 억제."""
+    d = abs(_bearing(G, prev, u) - _bearing(G, u, v))
+    if d > math.pi:
+        d = 2 * math.pi - d
+    if d < math.radians(50):
+        return 0.0
+    return TURN_PENALTY * (d / (math.pi / 2))
 
 
 def _path_cost(G: nx.DiGraph, path: list) -> float:
-    return sum(_edge_cost(u, v, G.edges[u, v]) for u, v in zip(path[:-1], path[1:]))
+    if len(path) < 2:
+        return 0.0
+    total = _edge_cost(path[0], path[1], G.edges[path[0], path[1]])
+    for i in range(1, len(path) - 1):
+        u, v = path[i], path[i + 1]
+        total += _edge_cost(u, v, G.edges[u, v])
+        total += _turn_extra(G, path[i - 1], u, v)
+        if path[i - 1] == v:
+            total += U_TURN_PENALTY
+    return total
 
 
 def _route_cost(G: nx.DiGraph, src: int, dst: int, edge_usage: Counter | None = None) -> tuple[list, float]:
+    """혼잡·골목·급커브·겹침을 반영한 경로. (노드,직전노드) 상태로 턴 비용 반영."""
     usage = edge_usage or Counter()
-
-    def w(u, v, d):
-        return _edge_cost(u, v, d) + usage.get((u, v), 0) * OVERLAP_PENALTY
-
-    try:
-        path = nx.shortest_path(G, src, dst, weight=w)
-    except nx.NetworkXNoPath:
+    if src not in G or dst not in G:
         return [src], float("inf")
-    return path, _path_cost(G, path)
+    if src == dst:
+        return [src], 0.0
+
+    # state = (node, prev) ; start prev=None
+    pq: list[tuple[float, int, Optional[int]]] = [(0.0, src, None)]
+    best: dict[tuple[int, Optional[int]], float] = {(src, None): 0.0}
+    came: dict[tuple[int, Optional[int]], tuple[int, Optional[int]]] = {}
+    found: tuple[int, Optional[int]] | None = None
+
+    while pq:
+        cost, u, prev = heapq.heappop(pq)
+        if cost != best.get((u, prev), float("inf")):
+            continue
+        if u == dst:
+            found = (u, prev)
+            break
+        for _, v, d in G.out_edges(u, data=True):
+            step = _edge_cost(u, v, d) + usage.get((u, v), 0) * OVERLAP_PENALTY
+            if prev is not None:
+                step += _turn_extra(G, prev, u, v)
+                if v == prev:
+                    step += U_TURN_PENALTY
+            nd = cost + step
+            st = (v, u)
+            if nd < best.get(st, float("inf")):
+                best[st] = nd
+                came[st] = (u, prev)
+                heapq.heappush(pq, (nd, v, u))
+
+    if found is None:
+        cands = [(c, st) for st, c in best.items() if st[0] == dst]
+        if not cands:
+            return [src], float("inf")
+        _, found = min(cands)
+
+    path: list[int] = []
+    st: tuple[int, Optional[int]] | None = found
+    while st is not None:
+        path.append(st[0])
+        st = came.get(st)
+    path.reverse()
+    return path, best[found]
 
 
 def _euclid2(G: nx.DiGraph, a: int, b: int) -> float:
@@ -233,58 +393,269 @@ def _collect_unit_requests(incidents: list[Incident]) -> list[UnitRequest]:
     return reqs
 
 
-def _assign_station(G: nx.DiGraph, station_map: dict, incident_node: int,
-                    station_load: Counter, edge_usage: Counter) -> tuple[int, list, float]:
-    """남은 부하·혼잡·겹침을 반영해 이 현장에 가장 싼 소방서 1곳 선택."""
+def _station_xy(sid: int) -> tuple[float, float]:
+    for s in DAEGU_FIRE_STATIONS:
+        if int(s["station_id"]) == int(sid):
+            return float(s["lat"]), float(s["lng"])
+    raise KeyError(sid)
+
+
+def _hospital_xy(hid: int) -> tuple[float, float]:
+    for h in DAEGU_ER_HOSPITALS:
+        if int(h["hospital_id"]) == int(hid):
+            return float(h["lat"]), float(h["lng"])
+    raise KeyError(hid)
+
+
+def _scene_cong(G: nx.DiGraph, lat: float, lng: float) -> float:
+    """사고 지점 근처 그래프 혼잡 (보정용)."""
+    try:
+        n = nearest_node(G, lat, lng)
+    except Exception:
+        return 0.35
+    vals = []
+    for u, v, d in list(G.in_edges(n, data=True))[:8]:
+        vals.append(float(d.get("congestion", 0.35)))
+    for u, v, d in list(G.out_edges(n, data=True))[:8]:
+        vals.append(float(d.get("congestion", 0.35)))
+    if not vals:
+        return 0.35
+    return float(sum(vals) / len(vals))
+
+
+def _assign_station_osrm(
+    G: nx.DiGraph,
+    station_map: dict,
+    scene_xy: tuple[float, float],
+    fleet: StationFleet,
+    vehicle_type: str,
+    congestion: float,
+) -> tuple[int, dict, float]:
+    """잔여 차량 있는 서 중 OSRM ETA(혼잡보정) 최소."""
+    from osrm_router import apply_congestion_factor, route_pair
+    from road_shapes import haversine_m
+
     best = None
-    for sid, snode in station_map.items():
-        # 후보가 많으면 먼저 직선거리로 가지치기하지 않고 8개뿐이라 전부 평가
-        path, cost = _route_cost(G, snode, incident_node, edge_usage)
-        cost += station_load[sid] * STATION_REUSE_PENALTY
-        # 아주 먼 후보는 살짝 불리하게 (탐색 안정용)
-        cost += 0.5 * _euclid2(G, snode, incident_node) * 1e4
+    for sid in station_map:
+        try:
+            sxy = _station_xy(sid)
+        except KeyError:
+            continue
+        r = route_pair(sxy, scene_xy)
+        if not r:
+            cost = EMPTY_STATION_PENALTY
+            path_info = {
+                "coords": [[sxy[0], sxy[1]], [scene_xy[0], scene_xy[1]]],
+                "legs": [{
+                    "coords": [[sxy[0], sxy[1]], [scene_xy[0], scene_xy[1]]],
+                    "duration_min": 30.0,
+                    "distance_m": haversine_m(sxy[0], sxy[1], scene_xy[0], scene_xy[1]),
+                }],
+                "duration_min": 30.0,
+                "source": "fallback",
+            }
+        else:
+            path_info = r
+            cost = apply_congestion_factor(r["duration_min"], congestion)
+        avail = fleet.available(sid, vehicle_type)
+        if avail <= 0:
+            cost += EMPTY_STATION_PENALTY
+        else:
+            cost -= 0.15 * avail
         if best is None or cost < best[0]:
-            best = (cost, sid, path)
+            best = (cost, sid, path_info)
     assert best is not None
     return best[1], best[2], best[0]
 
 
-def _assign_hospital(G: nx.DiGraph, hospital_map: dict, incident_node: int,
-                     hospital_load: Counter, edge_usage: Counter) -> tuple[int, list, float]:
-    """혼잡·이미 배정된 환자 수·경로 겹침을 보고 응급실 선택."""
+def _assign_hospital_osrm(
+    G: nx.DiGraph,
+    hospital_map: dict,
+    scene_xy: tuple[float, float],
+    hospital_load: Counter,
+    congestion: float,
+) -> tuple[int, dict, float]:
+    from osrm_router import apply_congestion_factor, route_pair
+
     best = None
-    for hid, hnode in hospital_map.items():
-        path, cost = _route_cost(G, incident_node, hnode, edge_usage)
+    for hid in hospital_map:
+        try:
+            hxy = _hospital_xy(hid)
+        except KeyError:
+            continue
+        r = route_pair(scene_xy, hxy)
+        if not r:
+            continue
+        cost = apply_congestion_factor(r["duration_min"], congestion)
         cost += hospital_load[hid] * HOSPITAL_LOAD_PENALTY
         if best is None or cost < best[0]:
-            best = (cost, hid, path)
-    assert best is not None
+            best = (cost, hid, r)
+    if best is None:
+        # fallback first hospital
+        hid = next(iter(hospital_map))
+        hxy = _hospital_xy(hid)
+        r = route_pair(scene_xy, hxy) or {
+            "coords": [[scene_xy[0], scene_xy[1]], [hxy[0], hxy[1]]],
+            "legs": [{
+                "coords": [[scene_xy[0], scene_xy[1]], [hxy[0], hxy[1]]],
+                "duration_min": 20.0,
+                "distance_m": 1000.0,
+            }],
+            "duration_min": 20.0,
+            "source": "fallback",
+        }
+        return hid, r, 20.0
     return best[1], best[2], best[0]
 
 
-def plan_global_dispatch(G: nx.DiGraph, station_map: dict, hospital_map: dict,
-                          incidents: list[Incident], verbose: bool = True) -> list[dict]:
-    """여러 사고를 한 번에 보고:
-      - 어느 소방서에서 출동할지
-      - (구급) 어느 응급실로 이송할지
-      - 경로가 서로 덜 겹치게
-    를 순차 탐욕 + 페널티로 전역 근사 최적화한다.
+def _merge_osrm_legs(leg_a: dict, leg_b: dict | None) -> dict:
+    """출동 leg + 이송 leg → 하나의 mission route."""
+    legs = list(leg_a.get("legs") or [])
+    coords = list(leg_a.get("coords") or [])
+    if leg_b:
+        for lg in leg_b.get("legs") or []:
+            legs.append(lg)
+        bcoords = leg_b.get("coords") or []
+        if coords and bcoords:
+            coords = coords + bcoords[1:]
+        elif bcoords:
+            coords = bcoords
+    return {
+        "coords": coords,
+        "legs": legs,
+        "duration_min": sum(float(x["duration_min"]) for x in legs),
+        "distance_m": sum(float(x.get("distance_m") or 0) for x in legs),
+        "source": leg_a.get("source") or "osrm",
+    }
+
+
+def plan_global_dispatch(
+    G: nx.DiGraph,
+    station_map: dict,
+    hospital_map: dict,
+    incidents: list[Incident],
+    verbose: bool = True,
+    fleet: StationFleet | None = None,
+) -> list[dict]:
+    """OSRM을 본체: 배차·경로·ETA가 동일 응답.
+
+    ROUTING_ENGINE=graph 이면 예전 표준노드 다익스트라로 폴백.
     """
+    from osrm_router import apply_congestion_factor, use_osrm
+    from road_shapes import haversine_m
+
+    if not use_osrm():
+        return _plan_global_dispatch_graph(
+            G, station_map, hospital_map, incidents, verbose=verbose, fleet=fleet,
+        )
+
+    missions: list[dict] = []
+    hospital_load: Counter = Counter()
+    fle = fleet if fleet is not None else StationFleet.from_stations()
+    skipped = 0
+
+    # incident_id → Incident
+    by_id = {inc.incident_id: inc for inc in incidents}
+
+    for req in _collect_unit_requests(incidents):
+        inc = by_id[req.incident_id]
+        scene_xy = (float(inc.lat), float(inc.lng))
+        cong = _scene_cong(G, *scene_xy)
+
+        sid, dispatch_route, cost = _assign_station_osrm(
+            G, station_map, scene_xy, fle, req.vehicle_type, cong,
+        )
+        if not fle.take(sid, req.vehicle_type):
+            skipped += 1
+
+        if req.vehicle_type == "fire_truck":
+            eta = apply_congestion_factor(dispatch_route["duration_min"], cong)
+            missions.append({
+                "label": req.label,
+                "vehicle_type": "fire_truck",
+                "incident_id": req.incident_id,
+                "station_id": sid,
+                "path": [station_map[sid], req.incident_node],  # 호환용 노드 힌트
+                "hospital_id": None,
+                "dispatch_len": 1,  # OSRM leg 1개 = 현장
+                "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
+                "osrm": dispatch_route,
+                "congestion_factor": cong,
+                "eta_min_osrm": eta,
+                "scene_xy": scene_xy,
+                "station_xy": _station_xy(sid),
+                "hospital_xy": None,
+            })
+            continue
+
+        hid, transport_route, _ = _assign_hospital_osrm(
+            G, hospital_map, scene_xy, hospital_load, cong,
+        )
+        hospital_load[hid] += 1
+        merged = _merge_osrm_legs(dispatch_route, transport_route)
+        eta = apply_congestion_factor(merged["duration_min"], cong)
+        missions.append({
+            "label": req.label,
+            "vehicle_type": "ambulance",
+            "incident_id": req.incident_id,
+            "station_id": sid,
+            "path": [station_map[sid], req.incident_node, hospital_map[hid]],
+            "hospital_id": hid,
+            "dispatch_len": 1,  # 첫 leg 끝나면 현장
+            "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
+            "osrm": merged,
+            "congestion_factor": cong,
+            "eta_min_osrm": eta,
+            "scene_xy": scene_xy,
+            "station_xy": _station_xy(sid),
+            "hospital_xy": _hospital_xy(hid),
+        })
+
+    if verbose:
+        print(f"[dispatch_center] OSRM 배차 사고 {len(incidents)}건 / {len(missions)}대 "
+              f"| 고갈강제 {skipped}")
+        for m in missions:
+            src = (m.get("osrm") or {}).get("source", "?")
+            print(f"   {m['label']:14s} station#{m['station_id']} "
+                  f"ETA {m.get('eta_min_osrm', 0):.1f}min ({src})")
+
+    return missions
+
+
+def _plan_global_dispatch_graph(
+    G: nx.DiGraph,
+    station_map: dict,
+    hospital_map: dict,
+    incidents: list[Incident],
+    verbose: bool = True,
+    fleet: StationFleet | None = None,
+) -> list[dict]:
+    """레거시: 표준노드 최단경로 (ROUTING_ENGINE=graph)."""
     missions: list[dict] = []
     edge_usage: Counter = Counter()
-    station_load: Counter = Counter()
     hospital_load: Counter = Counter()
+    fle = fleet if fleet is not None else StationFleet.from_stations()
 
     def _commit_path(path: list):
         for u, v in zip(path[:-1], path[1:]):
             edge_usage[(u, v)] += 1
 
+    skipped = 0
     for req in _collect_unit_requests(incidents):
-        sid, dispatch_path, _ = _assign_station(
-            G, station_map, req.incident_node, station_load, edge_usage,
+        sid, dispatch_path, cost = _assign_station(
+            G, station_map, req.incident_node, fle, req.vehicle_type, edge_usage,
         )
-        station_load[sid] += 1
+        if not fle.take(sid, req.vehicle_type):
+            skipped += 1
         _commit_path(dispatch_path)
+
+        # 클릭 좌표 보존 (그래프 경로여도 현장 표시용)
+        _inc_xy = None
+        for _inc in incidents:
+            if _inc.incident_id == req.incident_id:
+                if _inc.lat and _inc.lng:
+                    _inc_xy = (float(_inc.lat), float(_inc.lng))
+                break
 
         if req.vehicle_type == "fire_truck":
             missions.append({
@@ -295,10 +666,13 @@ def plan_global_dispatch(G: nx.DiGraph, station_map: dict, hospital_map: dict,
                 "path": dispatch_path,
                 "hospital_id": None,
                 "dispatch_len": len(dispatch_path) - 1,
+                "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
+                "scene_xy": _inc_xy,
+                "station_xy": _station_xy(sid),
+                "hospital_xy": None,
             })
             continue
 
-        # 구급: 현장 도착 후 최적 응급실로 이송
         hid, transport_path, _ = _assign_hospital(
             G, hospital_map, req.incident_node, hospital_load, edge_usage,
         )
@@ -313,28 +687,63 @@ def plan_global_dispatch(G: nx.DiGraph, station_map: dict, hospital_map: dict,
             "path": full,
             "hospital_id": hid,
             "dispatch_len": len(dispatch_path) - 1,
+            "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
+            "scene_xy": _inc_xy,
+            "station_xy": _station_xy(sid),
+            "hospital_xy": _hospital_xy(hid),
         })
 
     if verbose:
-        total_edges = sum(max(0, len(m["path"]) - 1) for m in missions)
-        overlapped = sum(c - 1 for c in edge_usage.values() if c > 1)
-        print(f"[dispatch_center] 사고 {len(incidents)}건 / 배차 {len(missions)}대, "
-              f"총 이동엣지 {total_edges}개, 겹친 엣지 사용 {overlapped}회")
-        print(f"[dispatch_center] 소방서 부하: {dict(station_load)} | "
-              f"응급실 부하: {dict(hospital_load)}")
-        for m in missions:
-            extra = f", ER=#{m['hospital_id']}" if m["hospital_id"] is not None else ""
-            print(f"   {m['label']:14s} ({m['vehicle_type']:10s}) "
-                  f"station#{m['station_id']} -> {len(m['path'])-1}hops{extra}")
-
+        print(f"[dispatch_center] GRAPH 배차 {len(missions)}대 skipped={skipped}")
     return missions
 
 
+# keep old names used above
+def _assign_station(
+    G: nx.DiGraph,
+    station_map: dict,
+    incident_node: int,
+    fleet: StationFleet,
+    vehicle_type: str,
+    edge_usage: Counter,
+) -> tuple[int, list, float]:
+    """잔여 차량이 있는 소방서 중 경로비용 최소. 고갈되면 페널티로만 허용."""
+    best = None
+    for sid, snode in station_map.items():
+        path, cost = _route_cost(G, snode, incident_node, edge_usage)
+        avail = fleet.available(sid, vehicle_type)
+        if avail <= 0:
+            cost += EMPTY_STATION_PENALTY
+        else:
+            cost -= 0.15 * avail
+        cost += 0.5 * _euclid2(G, snode, incident_node) * 1e4
+        if best is None or cost < best[0]:
+            best = (cost, sid, path)
+    assert best is not None
+    return best[1], best[2], best[0]
+
+
+def _assign_hospital(G: nx.DiGraph, hospital_map: dict, incident_node: int,
+                     hospital_load: Counter, edge_usage: Counter) -> tuple[int, list, float]:
+    """혼잡·이미 배정된 환자 수·경로 겹침을 보고 응급실 선택. (출발지는 아님)"""
+    best = None
+    for hid, hnode in hospital_map.items():
+        path, cost = _route_cost(G, incident_node, hnode, edge_usage)
+        cost += hospital_load[hid] * HOSPITAL_LOAD_PENALTY
+        if best is None or cost < best[0]:
+            best = (cost, hid, path)
+    assert best is not None
+    return best[1], best[2], best[0]
+
+
 # 하위호환 래퍼 (단일 사고)
-def plan_multi_vehicle_dispatch(G, station_map, hospital_map, incident_node, spec, verbose=True):
+def plan_multi_vehicle_dispatch(G, station_map, hospital_map, incident_node, spec, verbose=True,
+                                fleet: StationFleet | None = None):
     inc = Incident(1, incident_node, "custom", spec,
                    lat=G.nodes[incident_node]["lat"], lng=G.nodes[incident_node]["lng"])
-    return plan_global_dispatch(G, station_map, hospital_map, [inc], verbose=verbose)
+    return plan_global_dispatch(
+        G, station_map, hospital_map, [inc], verbose=verbose, fleet=fleet,
+    )
 
 
 # ---------------------------------------------------------------------- #

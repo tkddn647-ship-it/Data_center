@@ -1,22 +1,20 @@
 """
 network_graph.py
 =================
-대구시 응급 골든타임 — **실제 대구 도로망(표준노드링크)** 위에
-경북대 ITS 혼잡(있으면)을 얹고, 실제 소방서·응급실을 스냅한다.
+대구시 응급 골든타임 — **오픈데이터 표준노드링크** 위에
+오픈 교통 통계(및 선택적 실시간 API / 안심구역 ITS)를 얹고,
+오픈 소방서·응급실 좌표를 스냅한다.
 
-지도 뼈대 (항상 실제 대구)
-----------------------------
-data/standard_node_link/daegu_nodes.csv + daegu_links.csv
-(공공데이터포털 대구시 표준노드/링크)
+기본 (오픈데이터)
+-----------------
+- data/standard_node_link/  표준노드·링크 (data.go.kr)
+- data/open/link_hourly_stats.csv  링크 시간별 속도
+- data/open/fire_stations.csv , er_hospitals.csv
 
-ITS (안심구역 data_dir 있을 때)
---------------------------------
-camerainfo / traffic → 최근접 표준노드에 혼잡 오버레이
-intersectioninfo → 참고(좌표 검증)
-
-ITS 없을 때(로컬 데모)
-----------------------
-실제 도로망 + 합성 혼잡으로도 **진짜 대구 모양** 경로 데모 가능.
+선택
+----
+- DAEGU_TRAFFIC_API_KEY  실시간 소통 (data.go.kr/15126266)
+- --data-dir 경북대 ITS   안심구역 보강
 """
 
 from __future__ import annotations
@@ -36,8 +34,40 @@ _HERE = Path(__file__).resolve().parent
 _DEFAULT_BACKBONE = _HERE / "data" / "standard_node_link"
 
 
+def _overlay_open_congestion(G: nx.DiGraph, verbose: bool = True) -> str:
+    """오픈 속도 프로파일 → 엣지 혼잡. 실시간 API 있으면 추가 보정."""
+    from daegu_open_data import (
+        apply_open_profile_to_graph,
+        apply_realtime_speeds,
+        fetch_realtime_traffic,
+        load_speed_profile,
+    )
+
+    source = "none"
+    profile = load_speed_profile()
+    if profile:
+        hits = apply_open_profile_to_graph(G, profile, hour=8, day_type="weekday")
+        source = profile.get("source", "open_profile")
+        if verbose:
+            print(
+                f"[network_graph] 오픈 속도프로파일 적용 roads_hit~{hits}, "
+                f"n_roads={profile.get('n_roads')}"
+            )
+    try:
+        items = fetch_realtime_traffic()
+        rt = apply_realtime_speeds(G, items)
+        if rt:
+            source = f"{source}+realtime_api" if source != "none" else "realtime_api"
+            if verbose:
+                print(f"[network_graph] 실시간 소통 API 매칭 {rt}개")
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(f"[network_graph] 실시간 API 생략: {e}")
+    return source
+
+
 def _overlay_its_congestion(G: nx.DiGraph, data_dir: str, verbose: bool = True) -> None:
-    """경북대 ITS 교통량을 최근접 표준노드 진입 엣지에 혼잡으로 반영."""
+    """경북대 ITS 교통량을 최근접 표준노드 진입 엣지에 혼잡으로 반영(선택)."""
     from data_schema import (
         load_daegu_camera_data,
         load_daegu_traffic_volume_data,
@@ -77,23 +107,24 @@ def _overlay_its_congestion(G: nx.DiGraph, data_dir: str, verbose: bool = True) 
         print(f"[network_graph] ITS 혼잡 오버레이 엣지 {hits}개 (cameras={len(cam)})")
 
 
-def snap_ems_facilities(G: nx.DiGraph) -> tuple[dict, dict]:
-    used: set[int] = set()
+def snap_ems_facilities(G: nx.DiGraph, max_snap_m: float = 800.0) -> tuple[dict, dict]:
+    """시설 좌표 → 최근접 표준노드.
 
-    def _snap(lat: float, lng: float) -> int:
-        ranked = sorted(
-            G.nodes,
-            key=lambda n: (G.nodes[n]["lat"] - lat) ** 2 + (G.nodes[n]["lng"] - lng) ** 2,
-        )
-        for n in ranked:
-            if n not in used:
-                used.add(n)
-                return int(n)
-        return int(ranked[0])
+    예전 unique 강제 스냅은 가까운 병원·서가 서로 밀어내 수백 m~km 밀림.
+    같은 노드를 공유해도 되며, 너무 먼 스냅은 경고만 남긴다.
+    """
+    from road_shapes import haversine_m
+
+    def _snap(lat: float, lng: float, label: str) -> int:
+        nid = nearest_node(G, lat, lng)
+        d = haversine_m(lat, lng, G.nodes[nid]["lat"], G.nodes[nid]["lng"])
+        if d > max_snap_m:
+            print(f"[network_graph] WARN snap {label}: {d:.0f}m (>{max_snap_m:.0f}m)")
+        return int(nid)
 
     station_map = {}
     for s in DAEGU_FIRE_STATIONS:
-        nid = _snap(s["lat"], s["lng"])
+        nid = _snap(s["lat"], s["lng"], s["station_name"])
         station_map[int(s["station_id"])] = nid
         G.nodes[nid]["is_station"] = True
         G.nodes[nid]["station_name"] = s["station_name"]
@@ -102,7 +133,7 @@ def snap_ems_facilities(G: nx.DiGraph) -> tuple[dict, dict]:
 
     hospital_map = {}
     for h in DAEGU_ER_HOSPITALS:
-        nid = _snap(h["lat"], h["lng"])
+        nid = _snap(h["lat"], h["lng"], h["hospital_name"])
         hospital_map[int(h["hospital_id"])] = nid
         G.nodes[nid]["is_hospital"] = True
         G.nodes[nid]["hospital_name"] = h["hospital_name"]
@@ -115,37 +146,46 @@ def snap_ems_facilities(G: nx.DiGraph) -> tuple[dict, dict]:
 def build_urban_graph(n_intersections: int = 40, verbose: bool = True,
                        data_dir: str | None = None,
                        backbone_dir: str | None = None) -> nx.DiGraph:
-    """실제 대구 표준노드링크 뼈대 (+ 선택적 ITS 혼잡)."""
+    """실제 대구 표준노드링크 뼈대 + 오픈 혼잡 (+ 선택 ITS)."""
     bdir = backbone_dir or str(_DEFAULT_BACKBONE)
     if not os.path.isdir(bdir):
         bdir = None
     G = build_backbone_graph(data_dir=bdir, verbose=verbose, clip_to_daegu=True)
 
-    # 데모용 기본 혼잡 (ITS 없을 때)
-    rng = np.random.default_rng(0)
-    for u, v, ed in G.edges(data=True):
-        if "congestion" not in ed or ed.get("congestion") is None:
-            ed["congestion"] = float(rng.uniform(0.15, 0.55))
-        length_km = float(ed.get("length_m", 400.0)) / 1000.0
-        speed = max(15.0, 40.0 * (1 - 0.5 * ed["congestion"]))
-        ed["travel_time"] = (length_km / speed) * 60.0
-        ed.setdefault("risk", 0.25)
+    open_src = _overlay_open_congestion(G, verbose=verbose)
+    G.graph["open_congestion_source"] = open_src
+
+    if open_src == "none":
+        rng = np.random.default_rng(0)
+        for u, v, ed in G.edges(data=True):
+            if "congestion" not in ed or ed.get("congestion") is None:
+                ed["congestion"] = float(rng.uniform(0.15, 0.55))
+            length_km = float(ed.get("length_m", 400.0)) / 1000.0
+            speed = max(15.0, 40.0 * (1 - 0.5 * ed["congestion"]))
+            ed["travel_time"] = (length_km / speed) * 60.0
+            ed.setdefault("risk", 0.25)
+    else:
+        for _, _, ed in G.edges(data=True):
+            ed.setdefault("risk", 0.25)
 
     if data_dir:
         _overlay_its_congestion(G, data_dir, verbose=verbose)
 
     if verbose:
-        print(f"[network_graph] 대구 실도로망: nodes={G.number_of_nodes()}, edges={G.number_of_edges()}")
+        print(
+            f"[network_graph] 대구 실도로망: "
+            f"nodes={G.number_of_nodes()}, edges={G.number_of_edges()}"
+        )
     return G
 
 
 def build_combined_graph(n_hw_links: int = 200, n_intersections: int = 40, verbose: bool = True,
                           data_dir: str | None = None, backbone_dir: str | None = None, **_kw):
     if verbose:
-        print("[network_graph] 스코프: 대구시 응급 골든타임")
-        print("[network_graph] 지도: 대구 표준노드링크(실제 도로) + 실제 병원/소방서 좌표")
+        print("[network_graph] 스코프: 대구시 응급 골든타임 (오픈데이터 기본)")
+        print("[network_graph] 지도: 표준노드링크 + 오픈 소방/응급의료")
         if data_dir:
-            print(f"[network_graph] ITS 혼잡 오버레이: {data_dir}")
+            print(f"[network_graph] ITS 보강: {data_dir}")
 
     G = build_urban_graph(
         n_intersections=n_intersections, verbose=verbose,
@@ -158,15 +198,16 @@ def build_combined_graph(n_hw_links: int = 200, n_intersections: int = 40, verbo
     if verbose:
         print("[network_graph] 소방서 스냅:")
         for sid, nid in station_map.items():
-            name = next(s["station_name"] for s in DAEGU_FIRE_STATIONS if s["station_id"] == sid)
-            print(f"   {name} -> node {nid} @ ({G.nodes[nid]['lat']:.5f},{G.nodes[nid]['lng']:.5f})")
+            name = next(
+                s["station_name"] for s in DAEGU_FIRE_STATIONS if s["station_id"] == sid
+            )
+            print(f"  #{sid} {name} -> node {nid}")
         print("[network_graph] 응급실 스냅:")
         for hid, nid in hospital_map.items():
-            name = next(h["hospital_name"] for h in DAEGU_ER_HOSPITALS if h["hospital_id"] == hid)
-            print(f"   {name} -> node {nid} @ ({G.nodes[nid]['lat']:.5f},{G.nodes[nid]['lng']:.5f})")
-        s0 = next(iter(station_map.values()))
-        ok = sum(1 for h in hospital_map.values() if nx.has_path(G, s0, h))
-        print(f"[network_graph] 샘플 소방서→병원 도달 {ok}/{len(hospital_map)}")
+            name = next(
+                h["hospital_name"] for h in DAEGU_ER_HOSPITALS if h["hospital_id"] == hid
+            )
+            print(f"  #{hid} {name} -> node {nid}")
 
     return G, hospital_map
 

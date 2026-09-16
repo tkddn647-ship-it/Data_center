@@ -1,17 +1,15 @@
 """
 congestion_time.py
 ==================
-표현/데모용 시간·캘린더 혼잡 모델.
+시간·캘린더 혼잡 모델.
 
-목표(학습 전 단계)
-------------------
-현재 날짜·시각을 기준으로
-  1) 앞으로 몇 시간 동안 교통이 얼마나 빡셀지 **예측**하고
+기본 축: 공공데이터 **링크별 시간별 통계**(data.go.kr/15117329) 속도 프로파일.
+(선택) 실시간 소통 API·안심구역 ITS 로 보정.
+
+현재 날짜·시각 기준으로
+  1) 앞으로 몇 시간 혼잡을 **예측**하고
   2) 그 예측으로 **최적 경로**를 짜며
-  3) 지도에 교통량을 **파랑(한산)→빨강(혼잡)** 으로 한눈에 보이게 한다.
-
-요일/주말/추석·설 등 연휴를 반영한다.
-나중에 안심구역 ITS + RL/시계열 학습 모델이 이 인터페이스를 대체하면 된다.
+  3) 지도에 교통량을 **파랑→빨강** 으로 표시한다.
 """
 
 from __future__ import annotations
@@ -159,41 +157,108 @@ class CalendarContext:
 
 @dataclass
 class TimeCongestionField:
-    """엣지별 base 혼잡 + 시간·캘린더 변조 + 단기 예측."""
+    """엣지별 base 혼잡 + 오픈 속도 프로파일 + 캘린더 변조 + 단기 예측."""
 
     base: dict
     phase: dict
     length_m: dict
     edge_list: list
     latlng: dict = field(default_factory=dict)
-    source: str = "synthetic_calendar_forecast"
+    road_name: dict = field(default_factory=dict)
+    open_profile: dict | None = None
+    source: str = "open_data_link_hourly"
     context: CalendarContext | None = None
 
     @classmethod
-    def from_graph(cls, G: nx.DiGraph, sample_edges: int = 2200, seed: int = 0) -> "TimeCongestionField":
+    def from_graph(cls, G: nx.DiGraph, sample_edges: int = 3800, seed: int = 0) -> "TimeCongestionField":
+        from daegu_open_data import (
+            _norm_road,
+            load_speed_profile,
+            profile_speed,
+            speed_to_congestion,
+        )
+        from road_shapes import edge_chord_m, should_draw_on_costmap
+
         rng = np.random.default_rng(seed)
-        base, phase, length_m, latlng = {}, {}, {}, {}
+        profile = load_speed_profile()
+        profile_roads = set((profile or {}).get("by_road") or {})
+        source = "open_data_link_hourly" if profile else "calendar_fallback"
+        if profile and profile.get("n_rows", 0) < 10000:
+            source = "open_data_link_hourly_sample"
+
+        now = datetime.now()
+        init_hour = now.hour
+        init_day = "weekday" if now.weekday() < 5 else "weekend"
+
+        # 실시간·프로파일이 있는 도로명 → 같은 도로의 미매칭 링크에 보간
+        road_cong: dict[str, list[float]] = {}
+        for _u, _v, d in G.edges(data=True):
+            if not d.get("realtime") or d.get("congestion") is None:
+                continue
+            rn = _norm_road(str(d.get("road_name") or ""))
+            if rn:
+                road_cong.setdefault(rn, []).append(float(d["congestion"]))
+        road_median = {k: float(np.median(v)) for k, v in road_cong.items() if v}
+
+        base, phase, length_m, latlng, road_name = {}, {}, {}, {}, {}
         for u, v, d in G.edges(data=True):
-            b = float(d.get("congestion", 0.3))
             lat = 0.5 * (G.nodes[u]["lat"] + G.nodes[v]["lat"])
             lng = 0.5 * (G.nodes[u]["lng"] + G.nodes[v]["lng"])
-            center_boost = 0.18 * np.exp(-((lat - 35.87) ** 2 + (lng - 128.60) ** 2) / (2 * 0.028 ** 2))
             length = float(d.get("length_m", 400.0))
-            short_boost = 0.08 if length < 250 else 0.0
-            base[(u, v)] = float(np.clip(b + center_boost + short_boost, 0.08, 0.92))
+            rname = str(d.get("road_name") or "")
+            rn = _norm_road(rname)
+            # 실시간 linkspeed 가 있으면 그걸 base 로 (지금 막힘 반영)
+            if d.get("realtime") and d.get("congestion") is not None:
+                b = float(d["congestion"])
+            elif rn and rn in road_median:
+                b = road_median[rn]
+            elif profile:
+                sp = profile_speed(profile, rname, hour=init_hour, day_type=init_day)
+                b = speed_to_congestion(sp)
+            else:
+                b = float(d.get("congestion", 0.3))
+                center_boost = 0.18 * np.exp(-((lat - 35.87) ** 2 + (lng - 128.60) ** 2) / (2 * 0.028 ** 2))
+                short_boost = 0.08 if length < 250 else 0.0
+                b = float(np.clip(b + center_boost + short_boost, 0.08, 0.92))
+            base[(u, v)] = float(np.clip(b, 0.05, 0.95))
             phase[(u, v)] = float(rng.uniform(0, 2 * np.pi))
             length_m[(u, v)] = length
             latlng[(u, v)] = (lat, lng)
+            road_name[(u, v)] = rname
 
-        edges = list(base.keys())
-        if len(edges) > sample_edges:
-            pick = rng.choice(len(edges), size=sample_edges, replace=False)
-            edge_list = [edges[i] for i in pick]
-        else:
-            edge_list = edges
+        scored: list[tuple[float, tuple]] = []
+        for u, v in base.keys():
+            if not should_draw_on_costmap(G, u, v):
+                continue
+            d = G.edges[u, v]
+            pri = 0.0
+            if d.get("realtime"):
+                pri += 120.0
+            if rn := _norm_road(str(d.get("road_name") or "")):
+                if rn in profile_roads:
+                    pri += 45.0
+                if rn in road_median:
+                    pri += 35.0
+            pri += max(0.0, 55.0 - edge_chord_m(G, u, v) / 12.0)
+            scored.append((pri, (u, v)))
+        scored.sort(key=lambda x: -x[0])
+        edge_list = [e for _, e in scored[:sample_edges]]
+        if len(edge_list) < min(800, sample_edges // 2):
+            seen = set(edge_list)
+            for u, v in base.keys():
+                if (u, v) in seen:
+                    continue
+                if should_draw_on_costmap(G, u, v):
+                    edge_list.append((u, v))
+                    seen.add((u, v))
+                if len(edge_list) >= sample_edges:
+                    break
         ctx = CalendarContext.from_date(date.today())
-        return cls(base=base, phase=phase, length_m=length_m, edge_list=edge_list,
-                   latlng=latlng, context=ctx)
+        return cls(
+            base=base, phase=phase, length_m=length_m, edge_list=edge_list,
+            latlng=latlng, road_name=road_name, open_profile=profile,
+            source=source, context=ctx,
+        )
 
     def set_date(self, day: date) -> CalendarContext:
         self.context = CalendarContext.from_date(day)
@@ -213,6 +278,28 @@ class TimeCongestionField:
         t_eff = t_min + lookahead_min
         day_type = self._day_type()
         h = (t_eff % (24 * 60)) / 60.0
+        hour = int(h) % 24
+
+        # 오픈데이터 속도 프로파일이 있으면 그걸 주 신호로 사용
+        if self.open_profile is not None:
+            from daegu_open_data import profile_speed, speed_to_congestion
+            # 경로 진행 시각의 시간대 속도 + 다음 시간대 보간(단기 예측)
+            sp0 = profile_speed(self.open_profile, self.road_name.get(key), hour, day_type=day_type)
+            sp1 = profile_speed(self.open_profile, self.road_name.get(key), hour + 1, day_type=day_type)
+            frac = h - hour
+            # lookahead가 있으면 더 먼 시간대 쪽으로 가중
+            look_h = lookahead_min / 60.0
+            sp = (1 - frac) * sp0 + frac * sp1
+            if look_h > 0:
+                sp_f = profile_speed(
+                    self.open_profile, self.road_name.get(key),
+                    int(h + look_h) % 24, day_type=day_type,
+                )
+                sp = 0.55 * sp + 0.45 * sp_f
+            # 연휴 이동은 공개 통계에 거의 없으므로 캘린더 배율만 소폭 보정
+            c = speed_to_congestion(sp) * (1.0 + 0.12 * (self._volume_factor() - 1.0))
+            return float(np.clip(c, 0.02, 0.98))
+
         side = np.sin(self.phase[key])
         morning_extra = 0.45 * max(0.0, -side) * np.exp(-0.5 * ((h - 8.0) / 0.65) ** 2)
         evening_extra = 0.50 * max(0.0, side) * np.exp(-0.5 * ((h - 18.2) / 0.75) ** 2)
@@ -296,25 +383,36 @@ class TimeCongestionField:
                      "color": traffic_color(peak)},
             "series": steps,
             "calendar": self.context.to_dict() if self.context else None,
-            "note": "데모용 캘린더·시간대 예측(학습 모델 대체 예정)",
+            "note": (
+                "오픈데이터 링크 시간통계 기반 예측"
+                if self.open_profile is not None
+                else "캘린더 폴백(오픈 통계 CSV 없음)"
+            ),
+            "source": self.source,
         }
 
     def costmap(self, G: nx.DiGraph, t_min: float, lookahead_min: float = 0.0) -> dict:
-        """파랑→빨강 교통량 지도."""
+        """파랑→빨강 교통량 지도 (짧은 구간 + 도로곡선 shape)."""
+        from road_shapes import (
+            get_edge_coords, should_draw_on_costmap, _load_cache, straight_coords,
+        )
+
+        cache = _load_cache()
         segments = []
         hist = [0, 0, 0, 0]
         for u, v in self.edge_list:
             if u not in G.nodes or v not in G.nodes:
                 continue
+            if not should_draw_on_costmap(G, u, v):
+                continue
             cong = self.congestion(u, v, t_min, lookahead_min=lookahead_min)
             lvl = congestion_level(cong)
             hist[lvl["level"]] += 1
-            du, dv = G.nodes[u], G.nodes[v]
+            coords = get_edge_coords(G, u, v, cache=cache, fetch=False)
+            if len(coords) < 2:
+                coords = straight_coords(G, u, v)
             segments.append({
-                "coords": [
-                    [float(du["lat"]), float(du["lng"])],
-                    [float(dv["lat"]), float(dv["lng"])],
-                ],
+                "coords": coords,
                 "congestion": round(cong, 3),
                 "level": lvl["level"],
                 "color": traffic_color(cong),
@@ -336,6 +434,7 @@ class TimeCongestionField:
             },
             "calendar": self.context.to_dict() if self.context else None,
             "city_avg": round(self.city_congestion(t_min, lookahead_min), 3),
+            "note": "고속도로·맵 가로질러 보이는 초장 직선은 숨김. 시내는 우선 표시+도로곡선(캐시)",
         }
 
 

@@ -78,23 +78,26 @@
       </div>
 
       <div class="clock-box">
-        <label for="sim-date">기준 날짜 (평일/주말/추석·설 반영)</label>
-        <input type="date" id="sim-date" style="width:100%;margin-bottom:0.45rem" />
+        <label>지금 (로컬 시각 · 고정)</label>
+        <p class="clock" id="clock"><span id="clock-text">--:--:--</span></p>
+        <div id="now-date" style="font-size:0.82rem;margin:0.15rem 0 0.35rem;font-weight:600"></div>
         <div id="cal-badge" style="font-size:0.78rem;margin-bottom:0.4rem;color:var(--muted)"></div>
-        <label>시뮬 시각</label>
-        <p class="clock" id="clock"><span id="clock-text">08:00:00</span> <small id="clock-src"></small></p>
-        <input type="range" id="time" min="0" max="1439" step="5" value="480" />
+        <div id="clock-src" style="font-size:0.68rem;color:var(--muted);margin-bottom:0.45rem;word-break:break-all"></div>
         <div class="row" style="margin-top:0.45rem">
-          <button type="button" class="play" id="btn-play">▶ 실시간 재생</button>
+          <button type="button" class="play" id="btn-play">▶ 출동 추적</button>
           <button type="button" class="ghost" id="btn-pause">일시정지</button>
         </div>
         <div style="margin-top:0.4rem">
-          <label for="speed">배속 <span id="speed-label">15x</span> (1x=실제 GPS 속도)</label>
-          <input type="range" id="speed" min="1" max="30" step="1" value="15" />
+          <label for="speed">차량 표시 배속 <span id="speed-label">1x</span>
+            <span style="color:var(--muted);font-weight:400"> (시계는 항상 지금 · 미래로 안 감)</span>
+          </label>
+          <input type="range" id="speed" min="1" max="20" step="1" value="1" />
         </div>
         <div id="cong-bar" style="margin-top:0.45rem;font-size:0.72rem;color:var(--muted)"></div>
         <div id="forecast-box" style="margin-top:0.5rem">
-          <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.25rem">향후 6시간 혼잡 예측</div>
+          <div style="font-size:0.72rem;color:var(--muted);margin-bottom:0.25rem">
+            향후 6시간 혼잡 예측 <em style="font-style:normal;opacity:.85">(경로 비용용 · 차가 미래로 가지는 않음)</em>
+          </div>
           <div id="forecast-bars" style="display:flex;align-items:flex-end;gap:3px;height:52px"></div>
           <div id="forecast-note" style="font-size:0.7rem;color:var(--muted);margin-top:0.25rem"></div>
         </div>
@@ -112,8 +115,8 @@
       </div>
 
       <div class="hint">
-        <strong>목표</strong>: 지금 날짜 기준으로 <em>앞으로</em> 얼마나 막힐지 예측하고 그걸로 경로를 잡음<br />
-        지도 색 = 교통량 (파랑 한산 · 빨강 혼잡). 학습 전 데모 모델입니다.
+        <strong>목표</strong>: <em>지금</em> 기준으로 “앞으로 막힐 길”을 예측해 <em>지금 출발</em> 경로를 잡음<br />
+        차량 마커는 GPS처럼 실제 이동을 표시 (시계는 미래로 가지 않음).
       </div>
 
       <div class="row">
@@ -127,8 +130,13 @@
         <div class="stat"><b id="s-ov">0</b>겹침</div>
         <div class="stat"><b id="s-rr">0</b>재경로</div>
       </div>
+      <div class="stats" style="margin-top:0.35rem">
+        <div class="stat"><b id="s-amb">—</b>구급잔여</div>
+        <div class="stat"><b id="s-fire">—</b>소방잔여</div>
+      </div>
+      <div id="fleet-box" class="hint" style="max-height:110px;overflow:auto;font-size:0.68rem;margin-top:0.35rem"></div>
 
-      <div class="status" id="status">준비됨 — 사고 찍고 재생하세요</div>
+      <div class="status" id="status">준비됨 — 사고 찍고 출동 추적</div>
       <div class="list" id="list"></div>
       <div class="log" id="log"></div>
       <div class="legend-c" id="legend"></div>
@@ -157,12 +165,42 @@
     let lastRerouteSimMin = -999;
     let syncingClock = false;
     let suppressDispatchFromClock = false;
+    let lastWallRerouteMs = 0;
+    let lastWallCostmapMs = 0;
+    let lastWallForecastMs = 0;
 
-    let simDate = null; // YYYY-MM-DD
+    let simDate = null; // YYYY-MM-DD — 항상 오늘
+
+    function localNowParts() {
+      const d = new Date();
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const tMinNow = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
+      return {
+        date: `${yyyy}-${mm}-${dd}`,
+        tMin: tMinNow,
+        label: `${yyyy}-${mm}-${dd} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`,
+      };
+    }
+
+    function syncWallClock(refreshMaps = false) {
+      const n = localNowParts();
+      simDate = n.date;
+      tMin = n.tMin; // 시계는 항상 실제 지금
+      const dateLabel = document.getElementById("now-date");
+      if (dateLabel) dateLabel.textContent = n.label;
+      const el = document.getElementById("clock-text");
+      if (el) el.textContent = clockLabel(tMin, true);
+      if (refreshMaps) {
+        scheduleCostmap(true);
+        refreshForecast();
+      }
+    }
 
     function getDateParam() {
-      const el = document.getElementById("sim-date");
-      return (el && el.value) ? el.value : (simDate || meta?.default_date);
+      if (!simDate) simDate = localNowParts().date;
+      return simDate;
     }
 
     function renderForecast(fc) {
@@ -216,36 +254,24 @@
       return `${hh}:${mm}:${ss}`;
     }
     function syncClockUI() {
-      const el = document.getElementById("clock-text");
-      if (el) el.textContent = clockLabel(tMin, true);
-      const slider = document.getElementById("time");
-      if (slider) {
-        syncingClock = true;
-        slider.value = String(Math.floor(tMin) % 1440);
-        syncingClock = false;
-      }
+      syncWallClock(false);
     }
 
     async function init() {
       meta = await (await fetch("/api/meta")).json();
       document.getElementById("clock-src").textContent = meta.congestion_source || "";
-      tMin = meta.default_t_min || 480;
-      simDate = meta.default_date;
-      const dateEl = document.getElementById("sim-date");
-      if (dateEl) {
-        dateEl.value = simDate;
-        dateEl.onchange = () => {
-          simDate = dateEl.value;
-          scheduleCostmap();
-          refreshForecast();
-          if (incidents.length) scheduleDispatch(true);
-        };
-      }
-      syncClockUI();
+      syncWallClock(false);
       if (meta.calendar) {
         document.getElementById("cal-badge").textContent =
           `${meta.calendar.date} · ${meta.calendar.weekday_name}요일 · ${meta.calendar.label}`;
       }
+
+      // 벽시계 1초 갱신 (출동 중이어도 시계는 지금)
+      setInterval(() => syncWallClock(false), 1000);
+      // 1분마다 혼잡·예측만 갱신
+      setInterval(() => {
+        syncWallClock(true);
+      }, 60000);
 
       const sel = document.getElementById("itype");
       for (const [k, v] of Object.entries(meta.presets)) {
@@ -259,7 +285,11 @@
       legend.innerHTML = `지도 색 = 교통량 <span class="sw" style="background:#2166ac"></span>한산
         <span class="sw" style="background:#ef8a62"></span>혼잡
         <span class="sw" style="background:#b2182b"></span>정체<br>
-        남색□ 소방서 · 빨강△ 응급실 · 형광선 출동경로`;
+        남색□ 소방서(실제) · 파란점=서 스냅노드 · 빨강△ 병원(실제)<br>
+        사고: <b>I마커 = 클릭한 그 좌표(현장)</b> · 경로도 그 좌표로 감<br>
+        남색□ 소방서 · 빨강△ 병원 · 형광선=출동경로`;
+
+      renderFleet(meta.fleet);
 
       const b = meta.bounds;
       const daeguBounds = L.latLngBounds(
@@ -326,7 +356,15 @@
             html: `<div style="width:11px;height:11px;background:#1a2332;border:2px solid #fff"></div>`,
             iconSize: [11,11], iconAnchor: [5,5],
           }),
-        }).bindTooltip(s.name).addTo(facilityLayer);
+        }).bindTooltip(`${s.name} (실제)`).addTo(facilityLayer);
+        if (s.snap_lat != null && s.snap_lng != null) {
+          L.circleMarker([s.snap_lat, s.snap_lng], {
+            radius: 3, color: "#1a2332", weight: 1, fillColor: "#4a90d9", fillOpacity: 0.9,
+          }).bindTooltip(`${s.name} 스냅노드`).addTo(facilityLayer);
+          L.polyline([[s.lat, s.lng], [s.snap_lat, s.snap_lng]], {
+            color: "#1a2332", weight: 1, dashArray: "2 3", opacity: 0.45,
+          }).addTo(facilityLayer);
+        }
       }
       for (const h of meta.hospitals) {
         L.marker([h.lat, h.lng], {
@@ -335,7 +373,12 @@
             html: `<div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid #9b2226"></div>`,
             iconSize: [12,11], iconAnchor: [6,11],
           }),
-        }).bindTooltip(h.name).addTo(facilityLayer);
+        }).bindTooltip(`${h.name} (실제)`).addTo(facilityLayer);
+        if (h.snap_lat != null && h.snap_lng != null) {
+          L.circleMarker([h.snap_lat, h.snap_lng], {
+            radius: 3, color: "#9b2226", weight: 1, fillColor: "#f4a261", fillOpacity: 0.9,
+          }).bindTooltip(`${h.name} 스냅노드`).addTo(facilityLayer);
+        }
       }
 
       map.on("click", (e) => {
@@ -347,15 +390,7 @@
         scheduleDispatch(true);
       });
 
-      document.getElementById("time").oninput = (e) => {
-        if (syncingClock) return;
-        tMin = Number(e.target.value);
-        syncClockUI();
-        scheduleCostmap();
-        refreshForecast();
-        // 재생 중 슬라이더 드래그가 플릿을 리셋하지 않게
-        if (!playing && incidents.length) scheduleDispatch(true);
-      };
+      document.getElementById("time") && (document.getElementById("time").oninput = null);
       const speedEl = document.getElementById("speed");
       const syncSpeedLabel = () => {
         document.getElementById("speed-label").textContent = `${speedEl.value}x`;
@@ -403,8 +438,10 @@
         for (const seg of segs) {
           L.polyline(seg.coords, {
             color: seg.color || "#888",
-            weight: 3.2 + (seg.level || 0) * 1.2,
-            opacity: 0.75,
+            weight: 4.5 + (seg.level || 0) * 1.4,
+            opacity: 0.88,
+            lineCap: "round",
+            lineJoin: "round",
             pane: "costPane",
             interactive: false,
           }).addTo(costLayer);
@@ -488,18 +525,21 @@
         if (data.forecast) renderForecast({ ...data.forecast, series: data.forecast.series, calendar: data.calendar, now: data.forecast.now, trend: data.forecast.trend, peak: data.forecast.peak });
         else refreshForecast();
         drawIncidents(data);
-        buildFleet(data.missions);
+        buildFleet(data.missions, data.incidents || []);
         drawRoutesAndVehicles();
         fitToMissions(data.missions);
         await refreshCostmap(true);
         await refreshForecast();
         document.getElementById("s-unit").textContent = String(data.summary.n_units);
         document.getElementById("s-ov").textContent = String(data.summary.overlap);
+        if (data.fleet) renderFleet(data.fleet);
         const totalEta = data.summary.total_eta_min != null ? data.summary.total_eta_min
           : data.missions.reduce((s, m) => s + (m.eta_min || 0), 0);
-        setStatus(`${data.time_label} 배차 ${data.missions.length}대 · ETA ${totalEta}분 · 교통량/경로 표시`);
+        const ambLeft = data.summary.amb_available != null ? ` · 구급잔여 ${data.summary.amb_available}` : "";
+        const rs = data.route_source || data.summary.route_source || "";
+        setStatus(`${data.time_label} 배차 ${data.missions.length}대 · ETA ${totalEta}분${ambLeft}` + (rs ? ` · 경로=${rs}` : ""));
         fillList(data);
-        logLine(`출동 경로 ${data.missions.length}건 표시`);
+        logLine(`출동 경로 ${data.missions.length}건 (${rs || "graph"})`);
         startPlay(true);
       } catch (err) {
         console.error(err);
@@ -529,14 +569,20 @@
     function drawIncidents(data) {
       incidentLayer.clearLayers();
       data.incidents.forEach(inc => {
-        L.circleMarker([inc.lat, inc.lng], {
-          radius: 9, color: "#111", weight: 2, fillColor: "#f4e8d8", fillOpacity: 1,
-        }).bindPopup(`<b>I${inc.incident_id}</b> ${inc.type}<br>${inc.label}`).addTo(incidentLayer);
-        L.marker([inc.lat, inc.lng], {
+        // 현장 = 사용자가 클릭한 좌표만 (스냅/병원 좌표로 절대 바꾸지 않음)
+        const mainLat = (inc.click_lat != null) ? inc.click_lat : inc.lat;
+        const mainLng = (inc.click_lng != null) ? inc.click_lng : inc.lng;
+        L.circleMarker([mainLat, mainLng], {
+          radius: 10, color: "#111", weight: 3, fillColor: "#ffe566", fillOpacity: 1,
+        }).bindPopup(
+          `<b>I${inc.incident_id} 현장(클릭)</b><br>${inc.type} · ${inc.label}<br>` +
+          `${mainLat.toFixed(5)}, ${mainLng.toFixed(5)}`
+        ).addTo(incidentLayer);
+        L.marker([mainLat, mainLng], {
           icon: L.divIcon({
             className: "",
-            html: `<div style="font:700 11px sans-serif;background:#1a2332;color:#fff;padding:1px 5px;border-radius:3px">I${inc.incident_id}</div>`,
-            iconSize: [28,16], iconAnchor: [-4, 18],
+            html: `<div style="font:700 12px sans-serif;background:#c1121f;color:#fff;padding:2px 6px;border-radius:3px">I${inc.incident_id}</div>`,
+            iconSize: [30,18], iconAnchor: [-4, 20],
           }),
         }).addTo(incidentLayer);
       });
@@ -555,7 +601,7 @@
             const eta = (m.eta_min != null) ? m.eta_min
               : ((m.edge_times || []).reduce((a, b) => a + Number(b || 0), 0) || null);
             const etaTxt = (eta != null && !Number.isNaN(Number(eta))) ? Number(eta).toFixed(1) : "-";
-            return `${m.label}: ${m.station_name || "소방서"} → ${m.hospital_name || "화재현장"} (ETA ${etaTxt}분)`;
+            return `${m.label}: ${m.station_name || "소방서"} → 현장 → ${m.hospital_name || "종료"} (ETA ${etaTxt}분)`;
           }).join("<br>")}</div>`;
         list.appendChild(div);
       });
@@ -564,12 +610,29 @@
       });
     }
 
-    function buildFleet(missions) {
+    function segmentsFromNodes(latlngs) {
+      if (!latlngs || latlngs.length < 2) return [];
+      const segs = [];
+      for (let i = 0; i < latlngs.length - 1; i++) segs.push([latlngs[i], latlngs[i + 1]]);
+      return segs;
+    }
+
+    function buildFleet(missions, incidentList) {
       vehicleLayer.clearLayers();
       fleet = [];
       missions.forEach((m, i) => {
-        const path = m.path || [];
-        if (path.length < 2) {
+        const nodeLL = (m.path_node_latlng && m.path_node_latlng.length)
+          ? m.path_node_latlng
+          : (m.path || []);
+        let segs = m.edge_segments || [];
+        const times = (m.edge_times && m.edge_times.length) ? m.edge_times.slice()
+          : nodeLL.slice(0, -1).map(() => 0.5);
+        // 구간 수 ≠ 시간 수 이면 노드 직선으로 재구성 (조기 완료 버그 방지)
+        if (segs.length !== times.length) {
+          segs = segmentsFromNodes(nodeLL);
+        }
+        const path = m.path && m.path.length >= 2 ? m.path : nodeLL;
+        if (path.length < 2 || times.length < 1) {
           console.warn("path too short", m.label, path);
           return;
         }
@@ -579,25 +642,38 @@
           pane: "vehiclePane",
         }).bindTooltip(m.label).addTo(vehicleLayer);
         const wp = m.waypoints || {};
+        // 현장 = 같은 응답의 클릭 좌표 (I마커와 100% 동일). 노드/병원 좌표 금지.
+        const incMeta = (incidentList || []).find(x => x.incident_id === m.incident_id);
+        const sll = (incMeta && incMeta.click_lat != null)
+          ? [incMeta.click_lat, incMeta.click_lng]
+          : (m.scene_xy || null);
+        // 중복 점 안 찍음: I마커가 이미 현장. 툴팁만 로그용으로 scene_xy 보관.
         fleet.push({
           id: m.id || m.label,
           label: m.label,
           vehicle_type: m.vehicle_type,
+          station_id: m.station_id,
           incident_id: m.incident_id,
           color,
           path,
           path_nodes: m.path_nodes || [],
-          edge_times: (m.edge_times && m.edge_times.length) ? m.edge_times.slice()
-            : path.slice(0, -1).map(() => 0.5),
+          path_node_latlng: nodeLL,
+          edge_segments: segs,
+          edge_times: times,
           edge_speeds: (m.edge_speeds && m.edge_speeds.length) ? m.edge_speeds.slice() : [],
           edgeIdx: 0,
           frac: 0,
           done: false,
+          reachedScene: false,
           marker,
           scene_node: wp.scene_node,
           hospital_node: wp.hospital_node,
           goal_node: m.goal_node,
-          dispatch_len: m.dispatch_len || 0,
+          scene_xy: sll,
+          hospital_xy: m.hospital_xy || null,
+          station_xy: m.station_xy || null,
+          route_source: m.route_source || "",
+          dispatch_len: (m.dispatch_len != null) ? Number(m.dispatch_len) : times.length,
           phase: "to_scene",
           polyline: null,
           casing: null,
@@ -606,8 +682,38 @@
       });
     }
 
-    function softUpdateRoutes(missions) {
-      buildFleet(missions);
+    function renderFleet(fleet) {
+      if (!fleet || !fleet.totals) return;
+      const ta = fleet.totals.ambulances || {};
+      const tf = fleet.totals.fire_trucks || {};
+      const ambEl = document.getElementById("s-amb");
+      const fireEl = document.getElementById("s-fire");
+      if (ambEl) ambEl.textContent = `${ta.available ?? "—"}/${ta.capacity ?? "—"}`;
+      if (fireEl) fireEl.textContent = `${tf.available ?? "—"}/${tf.capacity ?? "—"}`;
+      const box = document.getElementById("fleet-box");
+      if (!box) return;
+      const rows = (fleet.stations || []).map(s => {
+        const a = s.ambulances || {};
+        const f = s.fire_trucks || {};
+        const short = (s.station_name || "").replace("대구", "").replace("소방서", "");
+        return `${short} 구급 ${a.available}/${a.capacity} · 소방 ${f.available}/${f.capacity}`;
+      });
+      box.innerHTML = `<strong>소방서 잔여</strong><br>${rows.join("<br>")}`;
+    }
+
+    async function releaseFleetUnits(units) {
+      if (!units || !units.length) return;
+      try {
+        const res = await fetch("/api/fleet/release", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ units }),
+        });
+        const data = await res.json();
+        if (data.fleet) renderFleet(data.fleet);
+      } catch (e) {
+        console.warn(e);
+      }
     }
 
     function drawRoutesAndVehicles() {
@@ -633,13 +739,30 @@
       }
     }
 
+    function posOnPolyline(coords, frac) {
+      if (!coords || coords.length < 2) return coords && coords[0] ? coords[0] : [0, 0];
+      const f = Math.max(0, Math.min(1, frac));
+      if (f <= 0) return coords[0];
+      if (f >= 1) return coords[coords.length - 1];
+      const n = coords.length - 1;
+      const t = f * n;
+      const i = Math.min(Math.floor(t), n - 1);
+      const u = t - i;
+      const a = coords[i];
+      const b = coords[i + 1];
+      return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+    }
+
     function posOnEdge(v) {
-      if (!v.path.length) return [0,0];
+      const segs = v.edge_segments;
+      if (segs && segs.length && v.edgeIdx < segs.length && segs[v.edgeIdx] && segs[v.edgeIdx].length >= 2) {
+        return posOnPolyline(segs[v.edgeIdx], v.frac);
+      }
+      if (!v.path || !v.path.length) return [0, 0];
       if (v.edgeIdx >= v.path.length - 1) return v.path[v.path.length - 1];
       const a = v.path[v.edgeIdx];
       const b = v.path[v.edgeIdx + 1];
-      const f = v.frac;
-      return [a[0] + (b[0]-a[0])*f, a[1] + (b[1]-a[1])*f];
+      return [a[0] + (b[0] - a[0]) * v.frac, a[1] + (b[1] - a[1]) * v.frac];
     }
 
     function currentNode(v) {
@@ -649,29 +772,32 @@
 
     function startPlay(force = false) {
       if (playing && !force) {
-        setStatus(`이미 재생 중 @ ${clockLabel(tMin)}`);
+        setStatus(`이미 추적 중`);
         return;
       }
       if (!fleet.length) {
         if (incidents.length) {
-          setStatus("배차 후 재생합니다…");
+          setStatus("배차 후 추적을 시작합니다…");
           scheduleDispatch(true);
           return;
         }
         setStatus("먼저 사고를 찍어주세요", true);
         return;
       }
-      // 기존 루프 정리 후 재시작 (중간에 죽은 rAF 복구)
       stopPlay(false);
       playing = true;
+      syncWallClock(false);
       lastTs = performance.now();
-      setStatus(`▶ 재생 중 ${clockLabel(tMin)}`);
-      logLine("시뮬 재생 시작");
+      lastWallRerouteMs = performance.now();
+      lastWallCostmapMs = performance.now();
+      lastWallForecastMs = performance.now();
+      setStatus(`▶ 출동 추적 중 (시계=지금)`);
+      logLine("출동 추적 시작 (차량만 이동 · 시각은 실시간 지금)");
       raf = requestAnimationFrame(function loop(now) {
         if (!playing) return;
         try { tick(now); } catch (err) {
           console.error("tick error", err);
-          setStatus(`재생 오류: ${err.message || err}`, true);
+          setStatus(`추적 오류: ${err.message || err}`, true);
         }
         if (playing) raf = requestAnimationFrame(loop);
       });
@@ -683,30 +809,31 @@
       raf = null;
       if (playTimer) clearInterval(playTimer);
       playTimer = null;
-      if (updateStatus) setStatus(`일시정지 @ ${clockLabel(tMin)}`);
+      syncWallClock(false);
+      if (updateStatus) setStatus(`일시정지 · ${localNowParts().label}`);
     }
 
     function tick(now) {
       if (!playing) return;
       let dt = (now - lastTs) / 1000;
       if (!isFinite(dt) || dt < 0) dt = 0.05;
-      // interval+rAF 중복 호출 시 과도한 점프 방지
       dt = Math.min(Math.max(dt, 0.016), 0.2);
       lastTs = now;
 
+      // 벽시계는 절대 미래로 밀지 않음
+      syncWallClock(false);
+
       const speedEl = document.getElementById("speed");
-      const playbackX = Number(speedEl && speedEl.value ? speedEl.value : 15);
-      // 1x = 실제시간 (edge_times 분 단위)
-      const dSimMin = dt * playbackX / 60.0;
-      tMin = (tMin + dSimMin) % 1440;
-      syncClockUI();
+      const displayX = Number(speedEl && speedEl.value ? speedEl.value : 1);
+      // 차량 표시만 배속 (edge_times=분)
+      const dMoveMin = (dt * displayX) / 60.0;
 
       let liveSpeed = null;
       let moving = 0;
       for (const v of fleet) {
         if (v.done || !v.path || v.path.length < 2) continue;
         moving += 1;
-        let remain = dSimMin;
+        let remain = dMoveMin;
         while (remain > 0 && v.edgeIdx < v.edge_times.length) {
           const et = Math.max(Number(v.edge_times[v.edgeIdx]) || 0.2, 0.05);
           if (v.edge_speeds && v.edge_speeds[v.edgeIdx] != null) {
@@ -717,42 +844,71 @@
             remain -= left;
             v.edgeIdx += 1;
             v.frac = 0;
+            // 구간 끝점 스냅 (노드 배열 인덱스로 병원/교차점 끌어오지 않음)
+            const prev = v.edge_segments && v.edge_segments[v.edgeIdx - 1];
+            if (prev && prev.length) {
+              if (v.marker) v.marker.setLatLng(prev[prev.length - 1]);
+            }
           } else {
             v.frac += remain / et;
             remain = 0;
           }
         }
-        if (v.vehicle_type === "ambulance" && v.phase === "to_scene" && v.dispatch_len != null) {
-          if (v.edgeIdx >= v.dispatch_len && v.phase === "to_scene") {
+        if (v.vehicle_type === "ambulance" && v.phase === "to_scene") {
+          const need = (v.dispatch_len != null) ? Number(v.dispatch_len) : -1;
+          if (need >= 0 && v.edgeIdx >= need && !v.reachedScene) {
+            v.reachedScene = true;
             v.phase = "to_hospital";
             v.goal_node = v.hospital_node;
+            // 반드시 클릭 현장 좌표
+            if (v.scene_xy && v.marker) v.marker.setLatLng(v.scene_xy);
             logLine(`${v.label} 현장 도착 → 응급실 이송`);
           }
         }
         if (v.edgeIdx >= v.edge_times.length) {
           if (!v.done) {
+            if (v.vehicle_type === "ambulance" && !v.reachedScene) {
+              v.reachedScene = true;
+              v.phase = "to_hospital";
+              if (v.scene_xy && v.marker) v.marker.setLatLng(v.scene_xy);
+              logLine(`${v.label} 현장 경유 확인`);
+            }
             v.done = true;
             v.frac = 0;
-            logLine(`${v.label} 도착 완료`);
+            const endLL = v.hospital_xy || (v.path && v.path.length ? v.path[v.path.length - 1] : null);
+            if (endLL && v.marker) v.marker.setLatLng(endLL);
+            logLine(`${v.label} 도착 완료 → 차량 복귀`);
+            if (v.station_id != null) {
+              releaseFleetUnits([{
+                id: v.id,
+                station_id: v.station_id,
+                vehicle_type: v.vehicle_type,
+              }]);
+            }
           }
         }
         if (v.marker) v.marker.setLatLng(posOnEdge(v));
       }
 
       const spdTxt = liveSpeed != null ? ` · GPS ${liveSpeed} km/h` : "";
-      setStatus(`▶ ${clockLabel(tMin)} · ${playbackX}x · 이동 ${moving}/${fleet.length}${spdTxt}`);
+      setStatus(`▶ 지금 ${clockLabel(tMin)} · 차량표시 ${displayX}x · 이동 ${moving}/${fleet.length}${spdTxt}`);
 
-      if (Math.abs(tMin - lastCostmapT) >= 5) scheduleCostmap();
-
-      // 재경로는 시뮬 2분마다
-      if (tMin - lastRerouteSimMin >= 2 || lastRerouteSimMin < 0) {
-        lastRerouteSimMin = tMin;
+      if (now - lastWallCostmapMs >= 30000) {
+        lastWallCostmapMs = now;
+        scheduleCostmap(true);
+      }
+      if (now - lastWallRerouteMs >= 120000) {
+        lastWallRerouteMs = now;
         maybeReroute();
       }
-      // 예측 막대는 시뮬 30분마다
-      if (!tick._lastFc || tMin - tick._lastFc >= 30) {
-        tick._lastFc = tMin;
+      if (now - lastWallForecastMs >= 60000) {
+        lastWallForecastMs = now;
         refreshForecast();
+      }
+
+      if (fleet.length && fleet.every(v => v.done)) {
+        stopPlay(false);
+        setStatus(`전 차량 도착 · ${localNowParts().label}`);
       }
     }
 
@@ -764,18 +920,23 @@
         vehicles: active.map(v => {
           const cur = currentNode(v);
           const remaining = (v.path_nodes || []).slice(v.edgeIdx);
+          const pos = posOnEdge(v);
           return {
             id: v.id,
             current_node: cur,
+            current_lat: pos[0],
+            current_lng: pos[1],
             goal_node: v.phase === "to_scene" ? v.scene_node : (v.goal_node || v.hospital_node),
             scene_node: v.scene_node,
             hospital_node: v.hospital_node,
+            scene_xy: v.scene_xy,
+            hospital_xy: v.hospital_xy,
             path_nodes: v.path_nodes,
             remaining_nodes: remaining,
             vehicle_type: v.vehicle_type,
             phase: v.phase,
           };
-        }).filter(x => x.current_node && (x.goal_node || x.scene_node)),
+        }).filter(x => (x.current_lat != null || x.current_node) && (x.goal_node || x.scene_node || x.scene_xy)),
       };
       if (!payload.vehicles.length) return;
       try {
@@ -800,6 +961,7 @@
             // 현재 위치에서 이어붙이기 — 진행률 유지하지 않고 새 남은 경로로 교체
             v.path = upd.path;
             v.path_nodes = upd.path_nodes;
+            v.edge_segments = upd.edge_segments || [];
             v.edge_times = upd.edge_times;
             if (upd.edge_speeds) v.edge_speeds = upd.edge_speeds;
             if (v.vehicle_type === "ambulance" && v.phase === "to_scene" && v.scene_node != null) {

@@ -45,8 +45,8 @@ import numpy as np
 import pandas as pd
 
 # 대구 대략 bbox (위도/경도) — gis_matching.check_daegu_bounds 와 동일 기준
-# 대구 대략 bbox — 칠곡경북대병원(북구 호국로) 포함
-DAEGU_LAT_MIN, DAEGU_LAT_MAX = 35.70, 36.00
+# 대구 대략 bbox — 칠곡경북대·달성 현풍 포함
+DAEGU_LAT_MIN, DAEGU_LAT_MAX = 35.68, 36.02
 DAEGU_LNG_MIN, DAEGU_LNG_MAX = 128.35, 128.80
 
 # 공개 CSV / SHP 에서 자주 쓰이는 컬럼명 별칭
