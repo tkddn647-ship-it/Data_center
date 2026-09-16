@@ -25,7 +25,30 @@
 
 > 한 문장: **학습은 안심구역에서 오프라인으로 돌리고, 나중에 온라인에서 관제 화면으로 본다. 안심구역 안에서는 공개 OSRM을 경로 본체로 쓰지 않는다.**
 
-지금은 **보여주기(관제 데모)** 단계이고, 이후 안심구역 ITS + RL 학습으로 같은 자리를 학습 모델이 대체한다.
+지금 **보여주기(관제 데모)** 단계이고, 이후 안심구역 ITS + RL 학습으로 같은 자리를 학습 모델이 대체한다.
+
+### 오프라인·안심구역용 도로망 (촘촘하게)
+
+학습은 인터넷 없이 돌아가야 하므로, **미리 받아 두는 오픈 도로망**이 본체다.
+
+| 우선순위 | 데이터 | 오프라인 | 촘촘함 | 혼잡/linkspeed 매칭 |
+|---|---|---|---|---|
+| **1 (권장)** | [ITS 전국 표준노드링크 SHP](https://www.its.go.kr/nodelink/nodelinkRef) | ✅ 한 번 다운로드 | 포털 대구 CSV보다 **더 촘촘** | ✅ 표준링크ID |
+| 2 | 지금 `data/standard_node_link/*.csv` | ✅ | 보통 | ✅ |
+| 3 | OSM PBF + 로컬 OSRM | ✅ (미리 받아두면) | **골목 최강** | ❌ ID 다름 · 혼잡은 별도 |
+
+**권장 절차 (안심구역 들어가기 전):**
+
+```bash
+# 1) 브라우저에서 ITS 표준노드링크 최신 ZIP 받기
+#    https://www.its.go.kr/nodelink/nodelinkRef
+# 2) MOCT_NODE.shp / MOCT_LINK.shp 를 data/standard_node_link/ 에 둠
+python build_dense_backbone.py
+# → daegu_nodes.csv / daegu_links.csv 를 대구만 잘라 촘촘하게 덮어씀
+```
+
+골목까지 “내비처럼”이 목표면 OSM이 답이고, **예측·학습·linkspeed와 한 파이프**로 가려면 ITS 표준노드링크가 맞다.  
+(표준노드링크는 원래 교통정보 교환용이라 모든 골목을 담진 않음 — 그 한계는 README에 명시.)
 
 ---
 
@@ -209,19 +232,23 @@ python demo_live_incident.py --seed 7 --hospital 0 --save live_incident.gif --no
 | 도로망 | 대구 표준노드/링크 | `data/standard_node_link/` | [노드](https://www.data.go.kr/data/15049953/fileData.do) · [링크](https://www.data.go.kr/data/15049952/fileData.do) |
 | 혼잡 예측 | 링크별 시간별 통계 (속도) | `data/open/link_hourly_stats.csv` | [15117329](https://www.data.go.kr/data/15117329/fileData.do) |
 | 소방 출발 | 소방서 좌표 | `data/open/fire_stations.csv` | 소방청 공개 좌표 등 |
+| 119센터 | 119안전센터 공간정보 | `data/open/safety_centers_119.csv` (SHP→변환) | [15117114](https://www.data.go.kr/data/15117114/fileData.do) |
+| 단지 진입 | 긴급차 진출입로(500세대↑) | `data/open/emergency_entrances_daegu.csv` | [15156867](https://www.data.go.kr/data/15156867/fileData.do) |
 | 병원 이송 | 응급의료기관 현황 + 좌표 | `data/open/er_hospitals.csv` | [15132528](https://www.data.go.kr/data/15132528/fileData.do) |
 | (선택) 실시간 | 교통소통정보(신) API | `.env` 의 `DAEGU_TRAFFIC_API_KEY` | [15126266](https://www.data.go.kr/data/15126266/openapi.do) |
+| (선택) 돌발 | 돌발 교통정보(신) API `/dgincident` | 동일 키 + `DAEGU_INCIDENT_API_URL` | [15126267](https://www.data.go.kr/data/15126267/openapi.do) |
 
-실시간 API 설정 (`.env`) — 연산명 **linkspeed**  
-([상세기능](https://www.data.go.kr/data/15126266/openapi.do#/API%20목록/linkspeed)):
+실시간·돌발 API 설정 (`.env`) — 온라인 시연용  
+([소통 linkspeed](https://www.data.go.kr/data/15126266/openapi.do) · [돌발 dgincident](https://www.data.go.kr/data/15126267/openapi.do)):
 
 ```bash
 DAEGU_TRAFFIC_API_KEY=발급받은_일반인증키
 DAEGU_TRAFFIC_API_URL=https://apis.data.go.kr/6270000/service/rest1/linkspeed
+DAEGU_INCIDENT_API_URL=https://apis.data.go.kr/6270000/service/rest/dgincident
 ```
 
-확인: `python test_traffic_api.py`  
-응답의 `STD_LINK_ID`·`LINK_SPEED` 로 도로 혼잡에 반영됩니다.
+확인: `python test_traffic_api.py` · `python test_incident_api.py`  
+돌발은 **공사·사고·통제** 좌표를 경로 비용에 올려 우회하고, 관제 지도에 표시한다.
 
 
 준비 확인:

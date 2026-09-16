@@ -128,7 +128,7 @@
         <div class="stat"><b id="s-inc">0</b>사고</div>
         <div class="stat"><b id="s-unit">0</b>출동</div>
         <div class="stat"><b id="s-ov">0</b>겹침</div>
-        <div class="stat"><b id="s-rr">0</b>재경로</div>
+        <div class="stat"><b id="s-incident-road">—</b>돌발</div>
       </div>
       <div class="stats" style="margin-top:0.35rem">
         <div class="stat"><b id="s-amb">—</b>구급잔여</div>
@@ -289,9 +289,9 @@
       legend.innerHTML = `지도 색 = 교통량 <span class="sw" style="background:#2166ac"></span>한산
         <span class="sw" style="background:#ef8a62"></span>혼잡
         <span class="sw" style="background:#b2182b"></span>정체<br>
-        남색□ 소방서(실제) · 파란점=서 스냅노드 · 빨강△ 병원(실제)<br>
-        사고: <b>I마커 = 클릭한 그 좌표(현장)</b> · 경로도 그 좌표로 감<br>
-        남색□ 소방서 · 빨강△ 병원 · 형광선=출동경로`;
+        <b style="color:#e85d04">주황 공사</b> · <b style="color:#9b2226">빨강 돌발</b><br>
+        남색□ 소방서 · 남색점 119센터 · <span style="color:#2a9d8f">초록점 아파트 진출입로</span><br>
+        I마커=현장(단지 근처면 입구 스냅) · 형광선=출동경로`;
 
       renderFleet(meta.fleet);
 
@@ -387,6 +387,21 @@
           }).bindTooltip(`${h.name} 스냅노드`).addTo(facilityLayer);
         }
       }
+      // 119안전센터
+      (meta.safety_centers || []).forEach(c => {
+        L.circleMarker([c.lat, c.lng], {
+          radius: 4, color: "#fff", weight: 1, fillColor: "#1d3557", fillOpacity: 0.85,
+        }).bindTooltip(`${c.name}`).addTo(facilityLayer);
+      });
+      // 아파트 긴급차 진출입로
+      (meta.emergency_entrances || []).forEach(e => {
+        L.circleMarker([e.lat, e.lng], {
+          radius: 3, color: "#fff", weight: 0.5, fillColor: "#2a9d8f", fillOpacity: 0.75,
+        }).bindTooltip(`${e.name || "단지"} 입구${e.gate ? " "+e.gate : ""}`).addTo(facilityLayer);
+      });
+      if ((meta.safety_centers || []).length || (meta.emergency_entrances || []).length) {
+        logLine(`안전센터 ${(meta.safety_centers||[]).length} · 진출입로 ${(meta.emergency_entrances||[]).length}`);
+      }
 
       map.on("click", (e) => {
         if (!daeguBounds.contains(e.latlng)) {
@@ -425,7 +440,48 @@
 
       await refreshCostmap(true);
       await refreshForecast();
+      await refreshRoadIncidents();
       setStatus("준비됨 — 날짜·시간 고르고 사고 찍기");
+    }
+
+    async function refreshRoadIncidents() {
+      try {
+        const data = await (await fetch("/api/road-incidents")).json();
+        if (!data.ok) {
+          setStatus(`돌발 API: ${data.error || "실패"}`, true);
+          return;
+        }
+        if (!facilityLayer) return;
+        let nConst = 0, nOther = 0;
+        (data.incidents || []).forEach(ev => {
+          const isConst = String(ev.code) === "2" || /공사/.test(ev.title || "");
+          if (isConst) nConst += 1; else nOther += 1;
+          const fill = isConst ? "#e85d04" : "#9b2226";
+          const label = isConst ? "공사" : "돌발";
+          L.marker([ev.lat, ev.lng], {
+            icon: L.divIcon({
+              className: "",
+              html: `<div style="font:800 11px sans-serif;background:${fill};color:#fff;padding:2px 6px;border-radius:4px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);white-space:nowrap">${label}</div>`,
+              iconSize: [40, 18], iconAnchor: [20, 9],
+            }),
+            zIndexOffset: 800,
+          }).bindPopup(
+            `<b>${label}</b> (code=${ev.code || "?"})<br>${(ev.title || "").slice(0, 160)}<br>` +
+            `${ev.location || ""}<br>${ev.start || ""} ~ ${ev.end || ""}`
+          ).addTo(facilityLayer);
+        });
+        const badge = document.getElementById("s-incident-road");
+        if (badge) badge.textContent = String((data.n || 0));
+        if ((data.n || 0) > 0) {
+          logLine(`돌발 ${data.n}건 (공사 ${nConst} · 기타 ${nOther})`);
+          setStatus(`준비됨 · 돌발 ${data.n}건 표시 (공사 ${nConst})`);
+        } else {
+          logLine("돌발 0건 (현재 진행 중 공사/사고 없음)");
+        }
+      } catch (e) {
+        console.warn("road-incidents", e);
+        setStatus(`돌발 로드 실패: ${e.message || e}`, true);
+      }
     }
 
     function scheduleCostmap() {

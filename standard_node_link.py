@@ -317,6 +317,12 @@ def resolve_backbone_tables(
     for d in search_dirs:
         if not d or not os.path.isdir(d):
             continue
+        # ITS 전국 SHP가 있으면 CSV보다 우선 (더 촘촘한 오프라인 뼈대)
+        node_shp = _find_file(d, ["MOCT_NODE.shp", "*MOCT*NODE*.shp"])
+        link_shp = _find_file(d, ["MOCT_LINK.shp", "*MOCT*LINK*.shp"])
+        if node_shp and link_shp:
+            return (*load_moct_shapefile(node_shp, link_shp), "shp")
+
         node_csv = _find_file(d, [
             "*표준노드*.csv", "*node*.csv", "*NODE*.csv", "MOCT_NODE.csv",
         ])
@@ -333,9 +339,9 @@ def resolve_backbone_tables(
             ):
                 return load_daegu_node_csv(node_csv), load_daegu_link_csv(link_csv), "csv"
 
-        node_shp = _find_file(d, ["MOCT_NODE.shp", "*NODE*.shp"])
-        link_shp = _find_file(d, ["MOCT_LINK.shp", "*LINK*.shp"])
-        if node_shp and link_shp:
+        node_shp = _find_file(d, ["*NODE*.shp"])
+        link_shp = _find_file(d, ["*LINK*.shp"])
+        if node_shp and link_shp and os.path.abspath(node_shp) != os.path.abspath(link_shp):
             return (*load_moct_shapefile(node_shp, link_shp), "shp")
 
     node_df, link_df = synthesize_daegu_backbone()

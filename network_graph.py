@@ -13,7 +13,7 @@ network_graph.py
 
 선택
 ----
-- DAEGU_TRAFFIC_API_KEY  실시간 소통 (data.go.kr/15126266)
+- DAEGU_TRAFFIC_API_KEY  실시간 소통 (data.go.kr/15126266) + 돌발 (15126267 /dgincident)
 - --data-dir 경북대 ITS   안심구역 보강
 """
 
@@ -35,10 +35,12 @@ _DEFAULT_BACKBONE = _HERE / "data" / "standard_node_link"
 
 
 def _overlay_open_congestion(G: nx.DiGraph, verbose: bool = True) -> str:
-    """오픈 속도 프로파일 → 엣지 혼잡. 실시간 API 있으면 추가 보정."""
+    """오픈 속도 프로파일 → 엣지 혼잡. 실시간·돌발 API 있으면 추가 보정."""
     from daegu_open_data import (
+        apply_incidents_to_graph,
         apply_open_profile_to_graph,
         apply_realtime_speeds,
+        fetch_incident_events,
         fetch_realtime_traffic,
         load_speed_profile,
     )
@@ -63,6 +65,16 @@ def _overlay_open_congestion(G: nx.DiGraph, verbose: bool = True) -> str:
     except Exception as e:  # noqa: BLE001
         if verbose:
             print(f"[network_graph] 실시간 API 생략: {e}")
+    try:
+        events = fetch_incident_events()
+        n = apply_incidents_to_graph(G, events)
+        if events:
+            source = f"{source}+dgincident" if source != "none" else "dgincident"
+            if verbose:
+                print(f"[network_graph] 돌발(공사·사고) {len(events)}건 → 엣지 {n}개 페널티")
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            print(f"[network_graph] 돌발 API 생략: {e}")
     return source
 
 

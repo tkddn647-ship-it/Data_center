@@ -9,6 +9,7 @@ daegu_open_data.py
   3) 응급의료기관 현황  → er_hospitals.csv           (data.go.kr/15132528 + 공개좌표)
   4) 소방서 좌표        → fire_stations.csv          (소방청 전국소방서 좌표 등)
   5) (선택) 실시간 소통 → DAEGU_TRAFFIC_API_KEY      (data.go.kr/15126266)
+  6) (선택) 돌발(공사·사고) → DAEGU_INCIDENT_API_URL (data.go.kr/15126267 /dgincident)
 
 안심구역 경북대 ITS는 선택 보강이다. 데모·예측의 기본 축은 오픈데이터다.
 """
@@ -52,6 +53,12 @@ OPEN_CATALOG = [
         "id": "traffic_api",
         "name": "대구 교통소통정보(신) API",
         "url": "https://www.data.go.kr/data/15126266/openapi.do",
+        "local": "env:DAEGU_TRAFFIC_API_KEY",
+    },
+    {
+        "id": "incident_api",
+        "name": "대구 돌발 교통정보 조회 서비스(신) API",
+        "url": "https://www.data.go.kr/data/15126267/openapi.do",
         "local": "env:DAEGU_TRAFFIC_API_KEY",
     },
     {
@@ -579,6 +586,180 @@ def fetch_realtime_traffic(api_key: str | None = None, timeout: float = 20.0) ->
             "상세기능 요청주소/파라미터를 확인하세요."
         )
     return out
+
+
+DEFAULT_INCIDENT_API_URL = (
+    "https://apis.data.go.kr/6270000/service/rest/dgincident"
+)
+
+# 돌발 유형 코드 → 혼잡 가산 (대략: 사고/통제 > 공사 > 기타)
+_INCIDENT_CODE_PENALTY = {
+    "1": 0.55,  # 사고 계열(추정)
+    "2": 0.45,  # 공사
+    "3": 0.35,  # 행사 등
+    "4": 0.40,
+    "5": 0.50,  # 통제/제한
+}
+
+
+def fetch_incident_events(api_key: str | None = None, timeout: float = 20.0) -> list[dict]:
+    """
+    대구 돌발 교통정보(신) — 공사·사고·통제 등.
+
+    https://www.data.go.kr/data/15126267/openapi.do
+    End Point: .../service/rest  +  /dgincident
+    환경변수: DAEGU_INCIDENT_API_URL (기본 위 URL)
+              DAEGU_TRAFFIC_API_KEY 또는 DATA_GO_KR_API_KEY
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    _load_dotenv()
+    key = api_key or os.environ.get("DAEGU_TRAFFIC_API_KEY") or os.environ.get("DATA_GO_KR_API_KEY")
+    if not key:
+        raise RuntimeError("DAEGU_TRAFFIC_API_KEY 가 필요합니다 (돌발 API도 동일 인증키)")
+
+    base = os.environ.get("DAEGU_INCIDENT_API_URL", DEFAULT_INCIDENT_API_URL).rstrip("/")
+    params = {
+        "serviceKey": key,
+        "pageNo": "1",
+        "numOfRows": "5000",
+        "type": "json",
+        "resultType": "json",
+    }
+    url = f"{base}?{urllib.parse.urlencode(params, safe='%')}"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "daegu-ems-open-data/1.0", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"돌발 API HTTP {e.code}: {body[:400]}") from e
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"돌발 API JSON 파싱 실패: {raw[:300]!r}") from e
+
+    err = _find_api_error(payload)
+    if err:
+        raise RuntimeError(f"돌발 API 오류: {err}")
+
+    items = _extract_items(payload)
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        low = {str(k).lower().replace("_", ""): v for k, v in it.items()}
+        # 응답: COORDX=경도, COORDY=위도, LINKID, INCIDENTCODE, INCIDENTTITLE, ...
+        lng = low.get("coordx") or low.get("lng") or low.get("lon") or low.get("x")
+        lat = low.get("coordy") or low.get("lat") or low.get("y")
+        link = low.get("linkid") or low.get("stdlinkid") or low.get("링크id")
+        code = str(low.get("incidentcode") or low.get("type") or "")
+        grade = str(low.get("troublegrade") or low.get("trafficgrade") or "")
+        title = str(low.get("incidenttitle") or low.get("title") or low.get("내용") or "")
+        loc = str(low.get("location") or low.get("주소") or "")
+        iid = str(low.get("incidentid") or low.get("id") or "")
+        start = str(low.get("startdate") or "")
+        end = str(low.get("enddate") or "")
+        if lat in (None, "") or lng in (None, ""):
+            continue
+        try:
+            lat_f, lng_f = float(lat), float(lng)
+        except (TypeError, ValueError):
+            continue
+        penalty = float(_INCIDENT_CODE_PENALTY.get(code, 0.40))
+        try:
+            g = int(str(grade).lstrip("0") or "0")
+            if g >= 3:
+                penalty = min(0.85, penalty + 0.15)
+            elif g >= 2:
+                penalty = min(0.75, penalty + 0.08)
+        except ValueError:
+            pass
+        out.append({
+            "incident_id": iid,
+            "lat": lat_f,
+            "lng": lng_f,
+            "link_id": _safe_int(link),
+            "code": code,
+            "grade": grade,
+            "title": title,
+            "location": loc,
+            "start": start,
+            "end": end,
+            "penalty": penalty,
+            "raw": it,
+        })
+    return out
+
+
+def apply_incidents_to_graph(G, events: list[dict], radius_m: float = 180.0) -> int:
+    """
+    돌발 지점 근처 엣지(및 LINKID 일치)에 혼잡 페널티를 올려 우회하게 함.
+    반환: 페널티가 적용된 엣지 수.
+    """
+    from standard_node_link import nearest_node
+    from road_shapes import haversine_m
+
+    if not events:
+        return 0
+
+    by_link: dict[int, float] = {}
+    for ev in events:
+        lid = ev.get("link_id")
+        if lid is not None:
+            by_link[int(lid)] = max(by_link.get(int(lid), 0.0), float(ev["penalty"]))
+
+    # 좌표 → 최근접 노드 주변
+    node_pen: dict[int, float] = {}
+    for ev in events:
+        try:
+            n = nearest_node(G, float(ev["lat"]), float(ev["lng"]))
+        except Exception:
+            continue
+        node_pen[n] = max(node_pen.get(n, 0.0), float(ev["penalty"]))
+        # 이웃 1홉
+        for nb in list(G.successors(n)) + list(G.predecessors(n)):
+            node_pen[nb] = max(node_pen.get(nb, 0.0), float(ev["penalty"]) * 0.7)
+
+    hits = 0
+    for u, v, ed in G.edges(data=True):
+        pen = 0.0
+        lid = ed.get("link_id")
+        if lid is not None and int(lid) in by_link:
+            pen = max(pen, by_link[int(lid)])
+        if u in node_pen:
+            pen = max(pen, node_pen[u])
+        if v in node_pen:
+            pen = max(pen, node_pen[v])
+        # 거리 기반 보강: 돌발 좌표와 엣지 중점
+        if pen <= 0 and events:
+            try:
+                mlat = (float(G.nodes[u]["lat"]) + float(G.nodes[v]["lat"])) / 2
+                mlng = (float(G.nodes[u]["lng"]) + float(G.nodes[v]["lng"])) / 2
+            except Exception:
+                continue
+            for ev in events:
+                d = haversine_m(mlat, mlng, float(ev["lat"]), float(ev["lng"]))
+                if d <= radius_m:
+                    pen = max(pen, float(ev["penalty"]) * (1.0 - d / radius_m))
+        if pen <= 0:
+            continue
+        old = float(ed.get("congestion", 0.35))
+        ed["congestion"] = float(min(0.95, max(old, pen)))
+        ed["incident"] = True
+        ed["incident_penalty"] = pen
+        # travel_time 재계산
+        length_km = float(ed.get("length_m", 400.0)) / 1000.0
+        sp = float(ed.get("speed_kmh_open") or max(8.0, 45.0 * (1.0 - 0.6 * ed["congestion"])))
+        ed["travel_time"] = (length_km / max(sp, 5.0)) * 60.0
+        hits += 1
+    return hits
 
 
 def _safe_int(v) -> int | None:

@@ -260,6 +260,34 @@ def _fleet_payload() -> dict:
     }
 
 
+def _safety_centers_payload() -> list:
+    try:
+        from ems_extra_geo import attach_parent_station, load_safety_centers
+        centers = attach_parent_station(load_safety_centers(), DAEGU_FIRE_STATIONS)
+        return [{
+            "id": c["center_id"], "name": c["name"], "type_cd": c.get("type_cd"),
+            "lat": c["lat"], "lng": c["lng"],
+            "parent_station_id": c.get("parent_station_id"),
+            "parent_station_name": c.get("parent_station_name"),
+        } for c in centers]
+    except Exception:
+        return []
+
+
+def _entrances_payload() -> list:
+    try:
+        from ems_extra_geo import load_emergency_entrances
+        ents = load_emergency_entrances()
+        # 지도 성능: 전부 내려도 946은 괜찮음
+        return [{
+            "name": e.get("name"), "gate": e.get("gate"),
+            "lat": e["lat"], "lng": e["lng"],
+            "address": e.get("address"),
+        } for e in ents]
+    except Exception:
+        return []
+
+
 def _release_active_out() -> None:
     global ACTIVE_OUT
     if FLEET is None:
@@ -365,7 +393,9 @@ def api_meta():
             for h in DAEGU_ER_HOSPITALS
         ],
         "fleet": _fleet_payload(),
-        "note_geo": "시설 아이콘=실제 좌표, 경로 출발/도착=표준노드 스냅. 사고 I마커=스냅 위치(클릭과 점선으로 연결).",
+        "safety_centers": _safety_centers_payload(),
+        "emergency_entrances": _entrances_payload(),
+        "note_geo": "남색□ 소방서 · 작은 남색점=119안전센터 · 초록점=아파트 긴급차 진출입로 · I=현장",
         "graph": {"nodes": G.number_of_nodes(), "edges": G.number_of_edges()},
         "congestion_levels": FIELD.costmap(G, t_now)["levels"] if FIELD else [],
         "congestion_source": FIELD.source if FIELD else None,
@@ -424,24 +454,39 @@ def api_dispatch():
             lng = float(item["lng"])
         except (KeyError, TypeError, ValueError):
             return jsonify({"error": f"incident {i}: lat/lng required"}), 400
+        click_lat, click_lng = lat, lng
+        entrance = None
+        try:
+            from ems_extra_geo import nearest_entrance
+            entrance = nearest_entrance(lat, lng, max_m=350.0)
+            if entrance:
+                lat, lng = float(entrance["lat"]), float(entrance["lng"])
+        except Exception:
+            entrance = None
         node = nearest_node(G, lat, lng)
         spec = INCIDENT_PRESETS[type_key]
         snap_lat = float(G.nodes[node]["lat"])
         snap_lng = float(G.nodes[node]["lng"])
         from road_shapes import haversine_m
         snap_m = round(haversine_m(lat, lng, snap_lat, snap_lng), 1)
-        # OSRM 본체: 사고 좌표는 클릭 그대로 (스냅은 참고·costmap용)
+        # 현장 좌표: 아파트 진출입로 스냅 있으면 그곳, 없으면 클릭
         incidents.append(Incident(
             incident_id=i, node=node, type_key=type_key, spec=spec,
             lat=lat, lng=lng,
         ))
         snapped.append({
             "incident_id": i, "type": type_key, "label": spec.label,
-            "click_lat": lat, "click_lng": lng,
+            "click_lat": click_lat, "click_lng": click_lng,
             "lat": lat, "lng": lng,
             "snap_lat": snap_lat, "snap_lng": snap_lng,
             "node": int(node),
             "snap_m": snap_m,
+            "entrance": ({
+                "name": entrance.get("name"),
+                "gate": entrance.get("gate"),
+                "dist_m": entrance.get("dist_m"),
+                "address": entrance.get("address"),
+            } if entrance else None),
             "n_fire": spec.n_fire_trucks, "n_amb": spec.n_ambulances,
         })
 
@@ -687,6 +732,29 @@ def api_snap():
         "lat": float(G.nodes[node]["lat"]),
         "lng": float(G.nodes[node]["lng"]),
     })
+
+
+@app.get("/api/road-incidents")
+def api_road_incidents():
+    """실시간 돌발(공사·사고·통제) — 지도 표시용."""
+    try:
+        from daegu_open_data import fetch_incident_events
+        events = fetch_incident_events()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e), "incidents": []})
+    slim = [{
+        "id": e.get("incident_id"),
+        "lat": e["lat"],
+        "lng": e["lng"],
+        "title": e.get("title"),
+        "location": e.get("location"),
+        "code": e.get("code"),
+        "grade": e.get("grade"),
+        "start": e.get("start"),
+        "end": e.get("end"),
+        "penalty": e.get("penalty"),
+    } for e in events]
+    return jsonify({"ok": True, "n": len(slim), "incidents": slim})
 
 
 def main():

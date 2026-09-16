@@ -7,7 +7,9 @@
 | `../standard_node_link/daegu_nodes.csv` | [표준노드](https://www.data.go.kr/data/15049953/fileData.do) | 도로 교차점 |
 | `../standard_node_link/daegu_links.csv` | [표준링크](https://www.data.go.kr/data/15049952/fileData.do) | 도로 연결 |
 | `link_hourly_stats.csv` | [링크 시간별 통계](https://www.data.go.kr/data/15117329/fileData.do) | 시간대 속도→혼잡 예측 |
-| `fire_stations.csv` | 소방청 전국소방서 좌표 등 | 출동 출발지 |
+| `fire_stations.csv` | 소방청 전국소방서 좌표 등 | 출동 출발지(본부) |
+| `safety_centers_119.csv` | [119안전센터 SHP](https://www.data.go.kr/data/15117114/fileData.do) | 더 가까운 출발(센터) |
+| `emergency_entrances_daegu.csv` | [긴급차 진출입로](https://www.data.go.kr/data/15156867/fileData.do) | 아파트 현장→입구 스냅 |
 | `station_fleet.csv` | [안전센터별 구급차 현황](https://www.data.go.kr/data/15066554/fileData.do) 스키마 시드 | 서별 구급·소방 **보유 대수** (출동 시 차감) |
 | `er_hospitals.csv` | [응급의료기관 현황](https://www.data.go.kr/data/15132528/fileData.do) + 공개좌표 | 이송 목적지 |
 | `hourly_speed_profile.json` | `python build_open_speed_profile.py` 로 생성 | 런타임 캐시 |

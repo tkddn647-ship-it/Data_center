@@ -1,0 +1,9 @@
+# 긴급자동차 진출입로 (대구 500세대↑ 공동주택)
+# 출처: https://www.data.go.kr/data/15156867/fileData.do
+# 사용법:
+#   1) 위 포털에서 CSV 다운로드
+#   2) 이 파일을 덮어쓰기 (같은 이름) 또는 원본을 이 경로로 복사
+#   3) python -c "from ems_extra_geo import load_emergency_entrances; print(len(load_emergency_entrances()))"
+#
+# 예상 컬럼: 단지코드, 단지명, 도로명주소, 입구번호, 좌표 X(WGS84경위도), 좌표 Y(WGS84경위도), ...
+단지코드,단지명,도로명주소,입구번호,좌표 X(WGS84경위도),좌표 Y(WGS84경위도),출입로명,출입로 참고메모

@@ -400,6 +400,25 @@ def _station_xy(sid: int) -> tuple[float, float]:
     raise KeyError(sid)
 
 
+def _dispatch_origin_xy(sid: int, scene_xy: tuple[float, float]) -> tuple[float, float]:
+    """소방서 재고(sid)는 유지하되, 현장에 더 가까운 119안전센터가 있으면 거기서 출발."""
+    base = _station_xy(sid)
+    try:
+        from ems_extra_geo import nearest_safety_center
+        from road_shapes import haversine_m
+        c = nearest_safety_center(scene_xy[0], scene_xy[1])
+        if not c:
+            return base
+        d_center = float(c.get("dist_m") or haversine_m(scene_xy[0], scene_xy[1], c["lat"], c["lng"]))
+        d_station = haversine_m(scene_xy[0], scene_xy[1], base[0], base[1])
+        # 센터가 더 가깝고, 소속 소방서와도 너무 멀지 않을 때
+        if d_center + 80 < d_station and d_center < 12000:
+            return float(c["lat"]), float(c["lng"])
+    except Exception:
+        pass
+    return base
+
+
 def _hospital_xy(hid: int) -> tuple[float, float]:
     for h in DAEGU_ER_HOSPITALS:
         if int(h["hospital_id"]) == int(hid):
@@ -438,7 +457,7 @@ def _assign_station_osrm(
     best = None
     for sid in station_map:
         try:
-            sxy = _station_xy(sid)
+            sxy = _dispatch_origin_xy(sid, scene_xy)
         except KeyError:
             continue
         r = route_pair(sxy, scene_xy)
@@ -584,7 +603,7 @@ def plan_global_dispatch(
                 "congestion_factor": cong,
                 "eta_min_osrm": eta,
                 "scene_xy": scene_xy,
-                "station_xy": _station_xy(sid),
+                "station_xy": _dispatch_origin_xy(sid, scene_xy),
                 "hospital_xy": None,
             })
             continue
@@ -608,7 +627,7 @@ def plan_global_dispatch(
             "congestion_factor": cong,
             "eta_min_osrm": eta,
             "scene_xy": scene_xy,
-            "station_xy": _station_xy(sid),
+            "station_xy": _dispatch_origin_xy(sid, scene_xy),
             "hospital_xy": _hospital_xy(hid),
         })
 
@@ -669,7 +688,7 @@ def _plan_global_dispatch_graph(
                 "dispatch_len": len(dispatch_path) - 1,
                 "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
                 "scene_xy": _inc_xy,
-                "station_xy": _station_xy(sid),
+                "station_xy": _dispatch_origin_xy(sid, _inc_xy) if _inc_xy else _station_xy(sid),
                 "hospital_xy": None,
             })
             continue
@@ -690,7 +709,7 @@ def _plan_global_dispatch_graph(
             "dispatch_len": len(dispatch_path) - 1,
             "fleet_exhausted": cost >= EMPTY_STATION_PENALTY / 2,
             "scene_xy": _inc_xy,
-            "station_xy": _station_xy(sid),
+            "station_xy": _dispatch_origin_xy(sid, _inc_xy) if _inc_xy else _station_xy(sid),
             "hospital_xy": _hospital_xy(hid),
         })
 

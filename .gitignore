@@ -13,3 +13,6 @@ Thumbs.db
 emergency_ppo.zip
 *.pt
 *.pth
+# ITS 전국 원본 SHP (수백 MB) — 대구 CSV만 커밋
+data/standard_node_link/NODELINKDATA/
+data/standard_node_link/*.bak
